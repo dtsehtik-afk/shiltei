@@ -22,7 +22,7 @@ export default function App() {
   const [token, setToken] = useState(localStorage.getItem("token") || null);
   const [role, setRole] = useState(localStorage.getItem("role") || null);
   const [userName, setUserName] = useState(localStorage.getItem("userName") || "");
-  const [screen, setScreen] = useState("login"); // login | register | admin | user
+  const [screen, setScreen] = useState("login"); // login | admin | user
 
   useEffect(() => {
     if (token && role === "admin") setScreen("admin");
@@ -51,8 +51,7 @@ export default function App() {
     <div className="app" dir="rtl">
       <Header role={role} userName={userName} onLogout={logout} screen={screen} setScreen={setScreen} />
       <main className="main">
-        {screen === "login" && <LoginScreen onLogin={onLogin} setScreen={setScreen} />}
-        {screen === "register" && <RegisterScreen setScreen={setScreen} />}
+        {screen === "login" && <LoginScreen onLogin={onLogin} />}
         {screen === "admin" && <AdminPanel token={token} />}
         {screen === "user" && <UserPanel token={token} userName={userName} />}
       </main>
@@ -86,37 +85,111 @@ function Header({ role, userName, onLogout, screen, setScreen }) {
   );
 }
 
-// ─── Login Screen ─────────────────────────────────────────────────────────────
-function LoginScreen({ onLogin, setScreen }) {
+// ─── Login Screen (Phone-based for customers) ────────────────────────────────
+function LoginScreen({ onLogin }) {
   const [tab, setTab] = useState("user"); // user | admin
-  const [form, setForm] = useState({ username: "", email: "", password: "" });
+  const [phone, setPhone] = useState("");
+  const [adminForm, setAdminForm] = useState({ username: "", password: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Phone flow states
+  const [phoneStep, setPhoneStep] = useState("phone"); // phone | register | welcome
+  const [welcomeName, setWelcomeName] = useState("");
+  const [welcomeToken, setWelcomeToken] = useState(null);
+  const [regForm, setRegForm] = useState({
+    first_name: "", last_name: "", invoice_name: "",
+    tax_id: "", email: "", company_name: ""
+  });
 
-  async function handleLogin(e) {
+  // Admin login
+  async function handleAdminLogin(e) {
     e.preventDefault();
     setLoading(true);
     setError("");
     try {
-      let data;
-      if (tab === "admin") {
-        data = await apiCall("/api/auth/admin/login", "POST", {
-          username: form.username,
-          password: form.password,
-        });
-        onLogin(data.access_token, "admin");
+      const data = await apiCall("/api/auth/admin/login", "POST", {
+        username: adminForm.username,
+        password: adminForm.password,
+      });
+      onLogin(data.access_token, "admin");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Phone login — step 1
+  async function handlePhoneCheck(e) {
+    e.preventDefault();
+    if (!phone.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const data = await apiCall("/api/auth/phone-login", "POST", { phone: phone.trim() });
+      if (data.status === "ok") {
+        // Known user → show welcome, then auto-login
+        setWelcomeName(data.name);
+        setWelcomeToken(data.access_token);
+        setPhoneStep("welcome");
+        setTimeout(() => {
+          onLogin(data.access_token, "user", data.name);
+        }, 1800);
       } else {
-        data = await apiCall("/api/auth/login", "POST", {
-          email: form.email,
-          password: form.password,
-        });
-        onLogin(data.access_token, "user", data.name);
+        // New user → show registration form
+        setPhoneStep("register");
       }
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
+  }
+
+  // Phone register — step 2
+  async function handlePhoneRegister(e) {
+    e.preventDefault();
+    if (!regForm.first_name.trim() || !regForm.last_name.trim()) {
+      setError("שם פרטי ושם משפחה הם שדות חובה");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const data = await apiCall("/api/auth/phone-register", "POST", {
+        phone: phone.trim(),
+        first_name: regForm.first_name,
+        last_name: regForm.last_name,
+        invoice_name: regForm.invoice_name,
+        tax_id: regForm.tax_id,
+        email: regForm.email,
+        company_name: regForm.company_name,
+      });
+      setWelcomeName(data.name);
+      setWelcomeToken(data.access_token);
+      setPhoneStep("welcome");
+      setTimeout(() => {
+        onLogin(data.access_token, "user", data.name);
+      }, 1800);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Welcome screen
+  if (phoneStep === "welcome") {
+    return (
+      <div className="auth-container">
+        <div className="card auth-card text-center welcome-card">
+          <div className="welcome-emoji">👋</div>
+          <h2 className="welcome-title">שלום, {welcomeName}!</h2>
+          <p className="welcome-sub">מעביר אותך לפורטל...</p>
+          <div className="welcome-loader"></div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -126,164 +199,203 @@ function LoginScreen({ onLogin, setScreen }) {
         <h2>כניסה למערכת</h2>
 
         <div className="tab-group">
-          <button className={`tab ${tab === "user" ? "active" : ""}`} onClick={() => setTab("user")}>
+          <button
+            className={`tab ${tab === "user" ? "active" : ""}`}
+            onClick={() => { setTab("user"); setError(""); setPhoneStep("phone"); }}
+          >
             👤 לקוח
           </button>
-          <button className={`tab ${tab === "admin" ? "active" : ""}`} onClick={() => setTab("admin")}>
+          <button
+            className={`tab ${tab === "admin" ? "active" : ""}`}
+            onClick={() => { setTab("admin"); setError(""); }}
+          >
             👑 מנהל
           </button>
         </div>
 
-        <form onSubmit={handleLogin} className="form">
-          {tab === "admin" ? (
+        {tab === "admin" ? (
+          <form onSubmit={handleAdminLogin} className="form">
             <div className="form-group">
               <label>שם משתמש</label>
               <input
                 type="text"
                 placeholder="admin"
-                value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value })}
+                value={adminForm.username}
+                onChange={(e) => setAdminForm({ ...adminForm, username: e.target.value })}
                 required
               />
             </div>
-          ) : (
             <div className="form-group">
-              <label>אימייל</label>
+              <label>סיסמה</label>
               <input
-                type="email"
-                placeholder="your@email.com"
-                value={form.email}
-                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                type="password"
+                placeholder="••••••••"
+                value={adminForm.password}
+                onChange={(e) => setAdminForm({ ...adminForm, password: e.target.value })}
                 required
               />
             </div>
-          )}
-
-          <div className="form-group">
-            <label>סיסמה</label>
-            <input
-              type="password"
-              placeholder="••••••••"
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-              required
-            />
-          </div>
-
-          {error && <div className="alert alert-error">{error}</div>}
-
-          <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
-            {loading ? "מתחבר..." : "כניסה"}
-          </button>
-        </form>
-
-        {tab === "user" && (
-          <p className="auth-link">
-            עדיין אין לך חשבון?{" "}
-            <button className="link-btn" onClick={() => setScreen("register")}>
-              הרשמה
+            {error && <div className="alert alert-error">{error}</div>}
+            <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
+              {loading ? "מתחבר..." : "כניסה"}
             </button>
-          </p>
+          </form>
+        ) : phoneStep === "phone" ? (
+          <form onSubmit={handlePhoneCheck} className="form">
+            <div className="form-group">
+              <label>📱 מספר טלפון</label>
+              <input
+                type="tel"
+                placeholder="050-0000000"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                required
+                className="phone-input"
+                autoFocus
+              />
+            </div>
+            {error && <div className="alert alert-error">{error}</div>}
+            <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
+              {loading ? "בודק..." : "📲 כניסה"}
+            </button>
+            <p className="auth-hint">הכנס מספר טלפון לכניסה מהירה או הרשמה</p>
+          </form>
+        ) : (
+          /* phoneStep === "register" */
+          <form onSubmit={handlePhoneRegister} className="form">
+            <div className="register-phone-badge">
+              📱 {phone}
+              <button type="button" className="link-btn" onClick={() => setPhoneStep("phone")}>שנה</button>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>שם פרטי *</label>
+                <input
+                  type="text" placeholder="ישראל" value={regForm.first_name}
+                  onChange={(e) => setRegForm({ ...regForm, first_name: e.target.value })}
+                  required autoFocus
+                />
+              </div>
+              <div className="form-group">
+                <label>שם משפחה *</label>
+                <input
+                  type="text" placeholder="ישראלי" value={regForm.last_name}
+                  onChange={(e) => setRegForm({ ...regForm, last_name: e.target.value })}
+                  required
+                />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>שם לחשבונית</label>
+                <input
+                  type="text" placeholder="שם העסק בע״מ" value={regForm.invoice_name}
+                  onChange={(e) => setRegForm({ ...regForm, invoice_name: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label>ח.פ / עוסק מורשה</label>
+                <input
+                  type="text" placeholder="51-1234567" value={regForm.tax_id}
+                  onChange={(e) => setRegForm({ ...regForm, tax_id: e.target.value })}
+                />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>אימייל</label>
+                <input
+                  type="email" placeholder="israel@company.co.il" value={regForm.email}
+                  onChange={(e) => setRegForm({ ...regForm, email: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label>שם חברה</label>
+                <input
+                  type="text" placeholder="חברה בע״מ" value={regForm.company_name}
+                  onChange={(e) => setRegForm({ ...regForm, company_name: e.target.value })}
+                />
+              </div>
+            </div>
+            {error && <div className="alert alert-error">{error}</div>}
+            <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
+              {loading ? "נרשם..." : "✅ הרשמה וכניסה"}
+            </button>
+            <p className="auth-hint">שדות עם * הם חובה</p>
+          </form>
         )}
       </div>
     </div>
   );
 }
 
-// ─── Register Screen ──────────────────────────────────────────────────────────
-function RegisterScreen({ setScreen }) {
+// ─── Edit Material Modal ──────────────────────────────────────────────────────
+function EditMaterialModal({ material, categories, onSave, onClose }) {
   const [form, setForm] = useState({
-    first_name: "", last_name: "", email: "", phone: "",
-    company_name: "", address: "", password: "", confirm: ""
+    name: material.name,
+    price_per_sqm: material.price_per_sqm,
+    min_sqm: material.min_sqm || 0.1,
+    category_id: material.category_id,
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState(false);
 
-  async function handleRegister(e) {
+  async function handleSave(e) {
     e.preventDefault();
-    if (form.password !== form.confirm) {
-      setError("הסיסמאות אינן תואמות");
-      return;
-    }
     setLoading(true);
     setError("");
     try {
-      await apiCall("/api/users/register", "POST", {
-        first_name: form.first_name,
-        last_name: form.last_name,
-        email: form.email,
-        phone: form.phone,
-        company_name: form.company_name,
-        address: form.address,
-        password: form.password,
+      await onSave(material.id, {
+        name: form.name,
+        price_per_sqm: parseFloat(form.price_per_sqm),
+        min_sqm: parseFloat(form.min_sqm),
+        category_id: parseInt(form.category_id),
       });
-      setSuccess(true);
     } catch (err) {
       setError(err.message);
-    } finally {
       setLoading(false);
     }
   }
 
-  if (success) {
-    return (
-      <div className="auth-container">
-        <div className="card auth-card text-center">
-          <div className="card-icon">🎉</div>
-          <h2>נרשמת בהצלחה!</h2>
-          <p>ברוך הבא למשפחת שלטי הצפון</p>
-          <button className="btn btn-primary" onClick={() => setScreen("login")}>
-            כניסה למערכת
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  const field = (key, label, type = "text", placeholder = "") => (
-    <div className="form-group">
-      <label>{label}</label>
-      <input
-        type={type}
-        placeholder={placeholder}
-        value={form[key]}
-        onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-      />
-    </div>
-  );
-
   return (
-    <div className="auth-container">
-      <div className="card auth-card wide">
-        <div className="card-icon">📝</div>
-        <h2>הרשמה למערכת</h2>
-        <form onSubmit={handleRegister} className="form">
-          <div className="form-row">
-            {field("first_name", "שם פרטי *", "text", "ישראל")}
-            {field("last_name", "שם משפחה *", "text", "ישראלי")}
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>✏️ עריכת חומר</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <form onSubmit={handleSave} className="form">
+          <div className="form-group">
+            <label>קטגוריה</label>
+            <select value={form.category_id} onChange={e => setForm({...form, category_id: e.target.value})} required>
+              {categories.map(c => <option key={c.id} value={c.id}>{c.display_name}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <label>שם החומר</label>
+            <input type="text" value={form.name}
+              onChange={e => setForm({...form, name: e.target.value})} required />
           </div>
           <div className="form-row">
-            {field("email", "אימייל *", "email", "israel@company.co.il")}
-            {field("phone", "טלפון", "tel", "050-0000000")}
+            <div className="form-group">
+              <label>מחיר ל-SQM (₪)</label>
+              <input type="number" step="0.01" value={form.price_per_sqm}
+                onChange={e => setForm({...form, price_per_sqm: e.target.value})} required />
+            </div>
+            <div className="form-group">
+              <label>מינימום מ"ר</label>
+              <input type="number" step="0.01" value={form.min_sqm}
+                onChange={e => setForm({...form, min_sqm: e.target.value})} required />
+            </div>
           </div>
-          {field("company_name", "שם חברה", "text", "חברה בע\"מ")}
-          {field("address", "כתובת", "text", "רחוב הדוגמה 1, תל אביב")}
-          <div className="form-row">
-            {field("password", "סיסמה *", "password", "••••••••")}
-            {field("confirm", "אימות סיסמה *", "password", "••••••••")}
-          </div>
-
           {error && <div className="alert alert-error">{error}</div>}
-
-          <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
-            {loading ? "נרשם..." : "הרשמה"}
-          </button>
+          <div className="modal-actions">
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? "שומר..." : "💾 שמור"}
+            </button>
+            <button type="button" className="btn btn-outline" onClick={onClose}>ביטול</button>
+          </div>
         </form>
-        <p className="auth-link">
-          כבר יש לך חשבון?{" "}
-          <button className="link-btn" onClick={() => setScreen("login")}>כניסה</button>
-        </p>
       </div>
     </div>
   );
@@ -299,6 +411,7 @@ function AdminPanel({ token }) {
   const [newMat, setNewMat] = useState({ category_id: "", name: "", price_per_sqm: "" });
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  const [editingMaterial, setEditingMaterial] = useState(null);
 
   useEffect(() => { loadMaterials(); loadCategories(); }, []);
   useEffect(() => {
@@ -353,6 +466,14 @@ function AdminPanel({ token }) {
     await apiCall(`/api/admin/materials/${mat.id}`, "PUT",
       { active: mat.active ? 0 : 1 }, token);
     loadMaterials();
+  }
+
+  async function saveMaterial(id, updates) {
+    await apiCall(`/api/admin/materials/${id}`, "PUT", updates, token);
+    setEditingMaterial(null);
+    setMsg("✅ חומר עודכן בהצלחה!");
+    loadMaterials();
+    setTimeout(() => setMsg(""), 3000);
   }
 
   const catName = (id) => categories.find(c => c.id === id)?.display_name || id;
@@ -416,6 +537,9 @@ function AdminPanel({ token }) {
                         </span>
                       </td>
                       <td className="actions">
+                        <button className="btn btn-sm btn-edit" onClick={() => setEditingMaterial(m)} title="עריכה">
+                          ✏️
+                        </button>
                         <button className="btn btn-sm btn-outline" onClick={() => toggleActive(m)}>
                           {m.active ? "השבת" : "הפעל"}
                         </button>
@@ -429,6 +553,15 @@ function AdminPanel({ token }) {
               </table>
             </div>
           </div>
+
+          {editingMaterial && (
+            <EditMaterialModal
+              material={editingMaterial}
+              categories={categories}
+              onSave={saveMaterial}
+              onClose={() => setEditingMaterial(null)}
+            />
+          )}
         </div>
       )}
 
@@ -438,15 +571,17 @@ function AdminPanel({ token }) {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>שם</th><th>אימייל</th><th>טלפון</th><th>חברה</th><th>תאריך</th></tr>
+                <tr><th>שם</th><th>טלפון</th><th>שם לחשבונית</th><th>ח.פ</th><th>אימייל</th><th>חברה</th><th>תאריך</th></tr>
               </thead>
               <tbody>
                 {users.map(u => (
                   <tr key={u.id}>
                     <td>{u.first_name} {u.last_name}</td>
-                    <td>{u.email}</td>
-                    <td>{u.phone}</td>
-                    <td>{u.company_name}</td>
+                    <td dir="ltr">{u.phone}</td>
+                    <td>{u.invoice_name || "—"}</td>
+                    <td dir="ltr">{u.tax_id || "—"}</td>
+                    <td>{u.email || "—"}</td>
+                    <td>{u.company_name || "—"}</td>
                     <td>{new Date(u.created_at).toLocaleDateString("he-IL")}</td>
                   </tr>
                 ))}

@@ -69,14 +69,26 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 first_name TEXT NOT NULL,
                 last_name TEXT NOT NULL,
-                email TEXT UNIQUE NOT NULL,
-                phone TEXT,
-                company_name TEXT,
-                address TEXT,
-                password_hash TEXT NOT NULL,
+                email TEXT DEFAULT '',
+                phone TEXT UNIQUE NOT NULL,
+                company_name TEXT DEFAULT '',
+                address TEXT DEFAULT '',
+                invoice_name TEXT DEFAULT '',
+                tax_id TEXT DEFAULT '',
+                password_hash TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now'))
             )
         """)
+
+        # Migration: add new columns if missing (for existing DBs)
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN invoice_name TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN tax_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
         # Categories table
         cur.execute("""
@@ -196,6 +208,18 @@ class AdminLogin(BaseModel):
     username: str
     password: str
 
+class PhoneLogin(BaseModel):
+    phone: str
+
+class PhoneRegister(BaseModel):
+    phone: str
+    first_name: str
+    last_name: str
+    invoice_name: Optional[str] = ""
+    tax_id: Optional[str] = ""
+    email: Optional[str] = ""
+    company_name: Optional[str] = ""
+
 class UserRegister(BaseModel):
     first_name: str
     last_name: str
@@ -218,6 +242,8 @@ class MaterialCreate(BaseModel):
 class MaterialUpdate(BaseModel):
     name: Optional[str] = None
     price_per_sqm: Optional[float] = None
+    min_sqm: Optional[float] = None
+    category_id: Optional[int] = None
     active: Optional[int] = None
 
 class QuoteRequest(BaseModel):
@@ -262,6 +288,62 @@ def user_login(data: UserLogin):
             "name": f"{row['first_name']} {row['last_name']}"}
 
 
+@app.post("/api/auth/phone-login")
+def phone_login(data: PhoneLogin):
+    """Login by phone number. Returns token if found, or status='new' if not."""
+    phone = data.phone.strip().replace("-", "")
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE REPLACE(phone, '-', '') = ?",
+            (phone,)
+        ).fetchone()
+    if not row:
+        return {"status": "new", "phone": data.phone.strip()}
+    token = create_token({
+        "sub": row["phone"],
+        "role": "user",
+        "id": row["id"],
+        "name": f"{row['first_name']} {row['last_name']}"
+    })
+    return {
+        "status": "ok",
+        "access_token": token,
+        "token_type": "bearer",
+        "role": "user",
+        "name": f"{row['first_name']} {row['last_name']}"
+    }
+
+
+@app.post("/api/auth/phone-register")
+def phone_register(data: PhoneRegister):
+    """Register a new user by phone and auto-login."""
+    phone = data.phone.strip().replace("-", "")
+    with get_db() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO users (first_name, last_name, email, phone, company_name, invoice_name, tax_id, password_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, '')""",
+                (data.first_name, data.last_name, data.email or "",
+                 phone, data.company_name or "", data.invoice_name or "", data.tax_id or "")
+            )
+            user_id = cur.lastrowid
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="מספר טלפון כבר קיים במערכת")
+    name = f"{data.first_name} {data.last_name}"
+    token = create_token({
+        "sub": phone,
+        "role": "user",
+        "id": user_id,
+        "name": name
+    })
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": "user",
+        "name": name
+    }
+
+
 @app.post("/api/users/register")
 def register_user(data: UserRegister):
     with get_db() as conn:
@@ -274,7 +356,7 @@ def register_user(data: UserRegister):
             )
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="אימייל כבר קיים במערכת")
-    return {"message": "נרשמת בהצלחה! 🎉"}
+    return {"message": "Registration successful"}
 
 
 # ─── Public Endpoints ──────────────────────────────────────────────────────────
@@ -391,7 +473,7 @@ def admin_delete_material(material_id: int, admin=Depends(get_current_admin)):
 def admin_get_users(admin=Depends(get_current_admin)):
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, first_name, last_name, email, phone, company_name, address, created_at FROM users"
+            "SELECT id, first_name, last_name, email, phone, company_name, invoice_name, tax_id, address, created_at FROM users"
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -416,8 +498,8 @@ def root():
 @app.on_event("startup")
 def startup():
     init_db()
-    print("✅ Database initialized")
-    print("👤 Admin: admin / admin123")
+    print("[OK] Database initialized")
+    print("[INFO] Admin: admin / admin123")
 
 
 if __name__ == "__main__":
