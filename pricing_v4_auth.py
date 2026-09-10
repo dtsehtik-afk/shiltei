@@ -64,21 +64,38 @@ def init_db():
         """)
 
         # Users table
-        cur.execute("""
+        conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                first_name TEXT NOT NULL,
-                last_name TEXT NOT NULL,
-                email TEXT DEFAULT '',
-                phone TEXT UNIQUE NOT NULL,
-                company_name TEXT DEFAULT '',
-                address TEXT DEFAULT '',
-                invoice_name TEXT DEFAULT '',
-                tax_id TEXT DEFAULT '',
-                password_hash TEXT DEFAULT '',
-                created_at TEXT DEFAULT (datetime('now'))
+                email TEXT UNIQUE,
+                password_hash TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                phone TEXT,
+                company_name TEXT,
+                invoice_name TEXT,
+                tax_id TEXT,
+                address TEXT,
+                role TEXT DEFAULT 'user',
+                discount_percent INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+        ''')
+        
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_material_id INTEGER,
+                print_material_id INTEGER,
+                lamination_id INTEGER,
+                active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (base_material_id) REFERENCES materials(id),
+                FOREIGN KEY (print_material_id) REFERENCES materials(id),
+                FOREIGN KEY (lamination_id) REFERENCES materials(id)
+            )
+        ''')
 
         # Migration: add new columns if missing (for existing DBs)
         try:
@@ -87,6 +104,10 @@ def init_db():
             pass
         try:
             cur.execute("ALTER TABLE users ADD COLUMN tax_id TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cur.execute("ALTER TABLE users ADD COLUMN discount_percent INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
 
@@ -107,8 +128,32 @@ def init_db():
                 name TEXT NOT NULL,
                 price_per_sqm REAL NOT NULL,
                 min_sqm REAL DEFAULT 0.1,
+                max_width REAL DEFAULT 0,
+                max_length REAL DEFAULT 0,
                 active INTEGER DEFAULT 1,
                 FOREIGN KEY (category_id) REFERENCES categories(id)
+            )
+        """)
+
+        # Migration for materials
+        try:
+            cur.execute("ALTER TABLE materials ADD COLUMN max_width REAL DEFAULT 0")
+            cur.execute("ALTER TABLE materials ADD COLUMN max_length REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
+        # Products (Shelf Products) table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                base_material_id INTEGER,
+                print_material_id INTEGER,
+                lamination_id INTEGER,
+                active INTEGER DEFAULT 1,
+                FOREIGN KEY (base_material_id) REFERENCES materials(id),
+                FOREIGN KEY (print_material_id) REFERENCES materials(id),
+                FOREIGN KEY (lamination_id) REFERENCES materials(id)
             )
         """)
 
@@ -238,11 +283,15 @@ class MaterialCreate(BaseModel):
     name: str
     price_per_sqm: float
     min_sqm: Optional[float] = 0.1
+    max_width: Optional[float] = 0.0
+    max_length: Optional[float] = 0.0
 
 class MaterialUpdate(BaseModel):
     name: Optional[str] = None
     price_per_sqm: Optional[float] = None
     min_sqm: Optional[float] = None
+    max_width: Optional[float] = None
+    max_length: Optional[float] = None
     category_id: Optional[int] = None
     active: Optional[int] = None
 
@@ -253,6 +302,30 @@ class QuoteRequest(BaseModel):
     print_material_id: Optional[int] = None
     base_material_id: Optional[int] = None
     lamination_id: Optional[int] = None
+
+class UserUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company_name: Optional[str] = None
+    invoice_name: Optional[str] = None
+    tax_id: Optional[str] = None
+    address: Optional[str] = None
+    discount_percent: Optional[int] = None
+
+class ProductCreate(BaseModel):
+    name: str
+    base_material_id: Optional[int] = None
+    print_material_id: Optional[int] = None
+    lamination_id: Optional[int] = None
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    base_material_id: Optional[int] = None
+    print_material_id: Optional[int] = None
+    lamination_id: Optional[int] = None
+    active: Optional[int] = None
 
 
 # ─── Auth Endpoints ────────────────────────────────────────────────────────────
@@ -389,29 +462,107 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
 
     breakdown = {}
     total = 0.0
+    discount_percent = 0
+    warnings = []
 
     with get_db() as conn:
+        if user_id:
+            user_row = conn.execute("SELECT discount_percent FROM users WHERE id=?", (user_id,)).fetchone()
+            if user_row:
+                discount_percent = user_row["discount_percent"] or 0
+                discount_percent = user_row["discount_percent"]
+
         def get_price(mat_id, category):
             if not mat_id:
-                return 0, "ללא"
+                return 0, "ללא", None
             row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
             if not row:
-                return 0, "לא נמצא"
+                return 0, "לא נמצא", None
             price = row["price_per_sqm"] * sqm * data.quantity
-            return price, row["name"]
+            
+            # Check dimensions constraints
+            max_w = row.get("max_width", 0)
+            max_l = row.get("max_length", 0)
+            if max_w > 0 and max_l > 0:
+                # Allow rotating: check if min(w,h) <= min(max_w, max_l) and max(w,h) <= max(max_w, max_l)
+                req_min = min(data.width_cm, data.height_cm)
+                req_max = max(data.width_cm, data.height_cm)
+                mat_min = min(max_w, max_l)
+                mat_max = max(max_w, max_l)
+                if req_min > mat_min or req_max > mat_max:
+                    warnings.append(f"מידות חריגות עבור החומר '{row['name']}' (מקסימום {max_w}x{max_l} ס\"מ). תיתכן תוספת תשלום או חלוקה.")
+            elif max_w > 0 and data.width_cm > max_w:
+                warnings.append(f"רוחב חריג עבור '{row['name']}' (מקסימום {max_w} ס\"מ).")
+            elif max_l > 0 and data.height_cm > max_l:
+                warnings.append(f"אורך חריג עבור '{row['name']}' (מקסימום {max_l} ס\"מ).")
 
-        print_price, print_name = get_price(data.print_material_id, "PRINT")
-        base_price, base_name = get_price(data.base_material_id, "BASE")
-        lam_price, lam_name = get_price(data.lamination_id, "LAMINATION")
+            return price, row["name"], row
 
-        total = print_price + base_price + lam_price
+        print_price, print_name, print_row = get_price(data.print_material_id, "PRINT")
+        base_price, base_name, base_row = get_price(data.base_material_id, "BASE")
+        lam_price, lam_name, lam_row = get_price(data.lamination_id, "LAMINATION")
+
+        total_before_discount = print_price + base_price + lam_price
+        discount_amount = total_before_discount * (discount_percent / 100.0)
+        total_after_discount = total_before_discount - discount_amount
+        vat_amount = total_after_discount * 0.17
+        final_total = total_after_discount + vat_amount
+
+        # Layout logic for Print material (assumed roll material if max_width > 0 and max_length == 0 or very large)
+        layout_details = None
+        if print_row and print_row.get("max_width", 0) > 0:
+            roll_w = print_row["max_width"]
+            item_w = data.width_cm
+            item_h = data.height_cm
+            qty = data.quantity
+
+            # Try upright
+            cols_upright = int(roll_w // item_w) if item_w > 0 else 0
+            len_upright = float('inf')
+            if cols_upright > 0:
+                rows_upright = (qty + cols_upright - 1) // cols_upright
+                len_upright = rows_upright * item_h
+
+            # Try rotated
+            cols_rot = int(roll_w // item_h) if item_h > 0 else 0
+            len_rot = float('inf')
+            if cols_rot > 0:
+                rows_rot = (qty + cols_rot - 1) // cols_rot
+                len_rot = rows_rot * item_w
+
+            best_len = min(len_upright, len_rot)
+            if best_len != float('inf'):
+                is_rotated = len_rot < len_upright
+                cols = cols_rot if is_rotated else cols_upright
+                rows = (qty + cols - 1) // cols
+                # Waste calc
+                used_area = (item_w / 100) * (item_h / 100) * qty
+                total_roll_area = (roll_w / 100) * (best_len / 100)
+                waste_percent = max(0, ((total_roll_area - used_area) / total_roll_area) * 100) if total_roll_area > 0 else 0
+
+                layout_details = {
+                    "roll_width_m": round(roll_w / 100, 2),
+                    "required_length_m": round(best_len / 100, 2),
+                    "columns": cols,
+                    "rows": rows,
+                    "is_rotated": is_rotated,
+                    "waste_percent": round(waste_percent, 1)
+                }
+
         breakdown = {
             "sqm": round(sqm, 4),
             "quantity": data.quantity,
             "print": {"name": print_name, "price": round(print_price, 2)},
             "base": {"name": base_name, "price": round(base_price, 2)},
             "lamination": {"name": lam_name, "price": round(lam_price, 2)},
-            "total": round(total, 2)
+            "subtotal": round(total_before_discount, 2),
+            "discount_percent": discount_percent,
+            "discount_amount": round(discount_amount, 2),
+            "total_after_discount": round(total_after_discount, 2),
+            "vat_amount": round(vat_amount, 2),
+            "total": round(final_total, 2),
+            "warnings": warnings,
+            "layout": layout_details
         }
 
         import json
@@ -421,7 +572,7 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (user_id, data.width_cm, data.height_cm, sqm,
               data.print_material_id, data.base_material_id, data.lamination_id,
-              data.quantity, total, json.dumps(breakdown, ensure_ascii=False)))
+              data.quantity, final_total, json.dumps(breakdown, ensure_ascii=False)))
 
     return breakdown
 
@@ -442,8 +593,8 @@ def admin_get_materials(admin=Depends(get_current_admin)):
 def admin_create_material(data: MaterialCreate, admin=Depends(get_current_admin)):
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO materials (category_id, name, price_per_sqm, min_sqm) VALUES (?, ?, ?, ?)",
-            (data.category_id, data.name, data.price_per_sqm, data.min_sqm)
+            "INSERT INTO materials (category_id, name, price_per_sqm, min_sqm, max_width, max_length) VALUES (?, ?, ?, ?, ?, ?)",
+            (data.category_id, data.name, data.price_per_sqm, data.min_sqm, data.max_width, data.max_length)
         )
     return {"id": cur.lastrowid, "message": "חומר נוסף בהצלחה"}
 
@@ -473,9 +624,68 @@ def admin_delete_material(material_id: int, admin=Depends(get_current_admin)):
 def admin_get_users(admin=Depends(get_current_admin)):
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, first_name, last_name, email, phone, company_name, invoice_name, tax_id, address, created_at FROM users"
+            "SELECT id, first_name, last_name, email, phone, company_name, invoice_name, tax_id, address, discount_percent, created_at FROM users"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.put("/api/admin/users/{user_id}")
+def admin_update_user(user_id: int, data: UserUpdate, admin=Depends(get_current_admin)):
+    updates = {k: v for k, v in data.dict().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="אין שינויים לעדכן")
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE users SET {set_clause} WHERE id=?",
+            (*updates.values(), user_id)
+        )
+    return {"message": "הלקוח עודכן בהצלחה"}
+
+
+@app.get("/api/products")
+def get_products():
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT p.*,
+                   bm.name as base_material_name,
+                   pm.name as print_material_name,
+                   lm.name as lamination_name
+            FROM products p
+            LEFT JOIN materials bm ON p.base_material_id = bm.id
+            LEFT JOIN materials pm ON p.print_material_id = pm.id
+            LEFT JOIN materials lm ON p.lamination_id = lm.id
+            WHERE p.active = 1
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/products")
+def admin_create_product(data: ProductCreate, admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO products (name, base_material_id, print_material_id, lamination_id) VALUES (?, ?, ?, ?)",
+            (data.name, data.base_material_id, data.print_material_id, data.lamination_id)
+        )
+    return {"id": cur.lastrowid, "message": "מוצר נוסף בהצלחה"}
+
+@app.put("/api/admin/products/{product_id}")
+def admin_update_product(product_id: int, data: ProductUpdate, admin=Depends(get_current_admin)):
+    updates = {k: v for k, v in data.dict().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="אין שינויים לעדכן")
+    set_clause = ", ".join(f"{k}=?" for k in updates)
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE products SET {set_clause} WHERE id=?",
+            (*updates.values(), product_id)
+        )
+    return {"message": "המוצר עודכן בהצלחה"}
+
+@app.delete("/api/admin/products/{product_id}")
+def admin_delete_product(product_id: int, admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        conn.execute("UPDATE products SET active=0 WHERE id=?", (product_id,))
+    return {"message": "המוצר הוסר"}
 
 
 @app.get("/api/admin/quotes")

@@ -668,3 +668,62 @@ body {
   .header, .footer, .btn, .tab-group, .form { display: none; }
   .result-card { box-shadow: none; border: 1px solid #ddd; }
 }
+
+/* Print & Professional Quote Layout */
+@media print {
+  body * { visibility: hidden; }
+  .result-card, .result-card * { visibility: visible; }
+  .result-card {
+    position: absolute; left: 0; top: 0;
+    width: 100%; border: none; box-shadow: none;
+    margin: 0; padding: 0;
+    background: #fff;
+  }
+  .print-page-break { page-break-before: always; }
+  .btn, .header, .panel-header { display: none !important; }
+}
+
+.quote-header {
+  background-color: #1a2a44; color: #fff;
+  padding: 30px; display: flex; justify-content: space-between;
+  align-items: center; border-radius: 8px 8px 0 0; margin: -20px -20px 20px -20px;
+}
+.quote-logo { display: flex; align-items: center; gap: 10px; }
+.quote-logo svg { height: 40px; }
+.quote-title { font-size: 2rem; margin: 0 0 10px 0; font-weight: bold; }
+.quote-info { font-size: 0.9rem; opacity: 0.9; }
+
+.quote-customer { margin-bottom: 20px; font-weight: bold; font-size: 1.1rem; }
+
+.quote-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+.quote-table th { background-color: #1a2a44; color: white; padding: 10px; text-align: right; }
+.quote-table td { padding: 10px; border-bottom: 1px solid #eee; }
+
+.quote-warnings { background-color: #fff0f0; border: 1px solid #ffcccc; color: #cc0000; padding: 10px; border-radius: 4px; margin-bottom: 20px; font-size: 0.9rem; }
+.quote-warning-item { margin-bottom: 5px; }
+
+.quote-summary { text-align: left; margin-top: 20px; }
+.quote-summary-row { display: flex; justify-content: flex-end; gap: 20px; margin-bottom: 5px; color: #555; }
+.quote-total-box {
+  background-color: #f7a600; color: #fff; font-weight: bold; font-size: 1.4rem;
+  padding: 15px 30px; border-radius: 4px; display: inline-block; margin-top: 10px;
+}
+
+.layout-page { margin-top: 40px; }
+.layout-title { color: #1a2a44; font-weight: bold; margin-bottom: 10px; }
+.layout-meta { color: #555; font-size: 0.9rem; margin-bottom: 20px; }
+.layout-visual {
+  border: 2px solid #1a2a44; height: 120px; position: relative; margin-top: 30px;
+  background-color: #f9f9f9; width: 100%; max-width: 800px;
+}
+.layout-roll-label { position: absolute; bottom: -25px; left: 50%; transform: translateX(-50%); font-size: 0.8rem; color: #555; }
+.layout-item-box {
+  background-color: #dceaf6; border-right: 1px solid #1a2a44; border-bottom: 1px solid #1a2a44;
+  height: 100%; float: right; display: flex; align-items: center; justify-content: center;
+  font-size: 0.8rem; color: #1a2a44; opacity: 0.8;
+}
+.layout-length-label {
+  position: absolute; right: -40px; top: 50%; transform: translateY(-50%) rotate(90deg);
+  font-size: 0.8rem; color: #555;
+}
+
