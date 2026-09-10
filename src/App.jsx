@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import "./App.css";
 
-const API = "http://localhost:8000";
+const API = import.meta.env.MODE === 'development' ? "http://localhost:8000" : "https://shiltei.onrender.com";
 
 // ─── API Helper ────────────────────────────────────────────────────────────────
 async function apiCall(endpoint, method = "GET", body = null, token = null) {
