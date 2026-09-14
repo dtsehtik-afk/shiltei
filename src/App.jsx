@@ -1141,6 +1141,26 @@ function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, t
 // when an admin reopens a previously saved order) ──────────────────────────────
 const ORDER_ROLE_LABEL = {print: '🖨️ הדפסה', base: '🪵 בסיס', lamination: '✨ למינציה'};
 
+// Picks a "nice" tick spacing (1/2/5×10^n) aiming for ~6 gridlines across `totalCm`, and
+// always includes the final edge even if it lands off-step — used to draw dimension rulers
+// on the cutting-layout diagrams.
+function niceTicks(totalCm) {
+  if (!totalCm || totalCm <= 0) return [0];
+  const target = 6;
+  const raw = totalCm / target;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  let step;
+  if (norm < 1.5) step = 1 * mag;
+  else if (norm < 3.5) step = 2 * mag;
+  else if (norm < 7.5) step = 5 * mag;
+  else step = 10 * mag;
+  const ticks = [];
+  for (let t = 0; t <= totalCm + 1e-6; t += step) ticks.push(Math.round(t * 10) / 10);
+  if (ticks[ticks.length - 1] < totalCm - step * 0.4) ticks.push(Math.round(totalCm * 10) / 10);
+  return ticks;
+}
+
 function OrderResultView({ result, isAdmin }) {
   return (
     <div className='card result-card' style={{marginTop: '16px'}}>
@@ -1252,6 +1272,8 @@ function OrderResultView({ result, isAdmin }) {
             // Bounded (rigid-sheet) materials: split shelves by which physical sheet they're
             // on, since it's several separate boards, not one continuous strip.
             const sheets = Array.from({length: numSheets}, (_, si) => g.shelves.filter(s => (s.sheet ?? 0) === si));
+            const widthTicks = niceTicks(rollWCm);
+            const lengthTicks = niceTicks(sheetLenCm);
 
             return (
               <div key={gi} className='layout-page' style={{marginTop: '16px'}}>
@@ -1261,38 +1283,88 @@ function OrderResultView({ result, isAdmin }) {
                     ? <>גודל לוח: {g.roll_width_m}×{g.sheet_length_m} מ' · נדרשים {numSheets} לוחות · בזבוז: {g.waste_percent}%</>
                     : <>רוחב גליל: {g.roll_width_m} מ' · אורך נדרש: {g.required_length_m} מ' · בזבוז: {g.waste_percent}%</>}
                 </div>
-                <div style={{display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '8px'}}>
-                  {sheets.map((shelves, si) => (
-                    <div key={si} style={{width: numSheets > 1 ? '200px' : '100%'}}>
-                      {numSheets > 1 && (
-                        <div style={{fontSize: '0.78rem', marginBottom: '4px', opacity: 0.75}}>לוח {si + 1} מתוך {numSheets}</div>
-                      )}
-                      <div style={{position: 'relative', width: '100%', paddingBottom: `${(sheetLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff'}}>
-                        {(() => {
-                          let runningTop = 0;
-                          return shelves.map((shelf, shi) => {
-                            const top = runningTop;
-                            runningTop += shelf.height;
-                            return (
-                              <div key={shi} style={{
-                                position: 'absolute', left: 0, width: '100%',
-                                top: `${(top / sheetLenCm) * 100}%`, height: `${(shelf.height / sheetLenCm) * 100}%`,
-                              }}>
-                                {shelf.items.map((it, ii) => (
-                                  <div key={ii} style={{
-                                    position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
-                                    width: `${(it.w / rollWCm) * 100}%`, height: '100%',
-                                    border: '1px solid #6c3fc5', boxSizing: 'border-box',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
-                                  }}>#{it.ref + 1}</div>
-                                ))}
-                              </div>
-                            );
-                          });
-                        })()}
+                <div style={{display: 'flex', flexWrap: 'wrap', gap: '22px', marginTop: '8px'}}>
+                  {sheets.map((shelves, si) => {
+                    // Precompute each shelf's vertical position, and how much of the sheet's
+                    // width/length ends up unused, so we can draw it explicitly.
+                    let runningTop = 0;
+                    const shelfTops = shelves.map(shelf => {
+                      const top = runningTop;
+                      runningTop += shelf.height;
+                      return top;
+                    });
+                    const unusedLenCm = Math.max(0, sheetLenCm - runningTop);
+
+                    return (
+                      <div key={si} style={{width: numSheets > 1 ? '230px' : '100%'}}>
+                        {numSheets > 1 && (
+                          <div style={{fontSize: '0.78rem', marginBottom: '4px', opacity: 0.75}}>לוח {si + 1} מתוך {numSheets}</div>
+                        )}
+                        <div style={{display: 'flex', gap: '4px'}}>
+                          {/* length ruler */}
+                          <div style={{position: 'relative', width: '24px', flexShrink: 0, marginTop: '18px', paddingBottom: `${(sheetLenCm / rollWCm) * 100}%`}}>
+                            {lengthTicks.map(t => (
+                              <div key={t} className='layout-ruler-label' style={{top: `${(t / sheetLenCm) * 100}%`, left: 0, transform: 'translateY(-50%)'}}>{t}</div>
+                            ))}
+                          </div>
+                          <div style={{flex: 1, minWidth: 0}}>
+                            {/* width ruler */}
+                            <div style={{position: 'relative', height: '14px'}}>
+                              {widthTicks.map(t => (
+                                <div key={t} className='layout-ruler-label' style={{left: `${(t / rollWCm) * 100}%`, top: 0, transform: 'translateX(-50%)'}}>{t}</div>
+                              ))}
+                            </div>
+                            <div style={{position: 'relative', width: '100%', paddingBottom: `${(sheetLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff'}}>
+                              {/* faint reference grid */}
+                              {widthTicks.map(t => (
+                                <div key={'gw' + t} style={{position: 'absolute', top: 0, bottom: 0, left: `${(t / rollWCm) * 100}%`, width: '1px', background: '#eee'}} />
+                              ))}
+                              {lengthTicks.map(t => (
+                                <div key={'gl' + t} style={{position: 'absolute', left: 0, right: 0, top: `${(t / sheetLenCm) * 100}%`, height: '1px', background: '#eee'}} />
+                              ))}
+                              {shelves.map((shelf, shi) => {
+                                const top = shelfTops[shi];
+                                const unusedW = Math.max(0, rollWCm - shelf.used_width);
+                                return (
+                                  <div key={shi} style={{
+                                    position: 'absolute', left: 0, width: '100%',
+                                    top: `${(top / sheetLenCm) * 100}%`, height: `${(shelf.height / sheetLenCm) * 100}%`,
+                                  }}>
+                                    {shelf.items.map((it, ii) => (
+                                      <div key={ii} style={{
+                                        position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
+                                        width: `${(it.w / rollWCm) * 100}%`, height: '100%',
+                                        border: '1px solid #6c3fc5', boxSizing: 'border-box',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
+                                      }}>#{it.ref + 1}</div>
+                                    ))}
+                                    {unusedW > 0.5 && (
+                                      <div
+                                        className='layout-unused-strip'
+                                        title={`רוחב לא מנוצל בשורה: ${unusedW.toFixed(1)} ס"מ`}
+                                        style={{left: `${(shelf.used_width / rollWCm) * 100}%`, width: `${(unusedW / rollWCm) * 100}%`, top: 0, height: '100%'}}
+                                      >
+                                        {(unusedW / rollWCm) > 0.09 && <span>{unusedW.toFixed(0)} ס"מ</span>}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {unusedLenCm > 0.5 && (
+                                <div
+                                  className='layout-unused-strip'
+                                  title={`אורך לא מנוצל בלוח: ${unusedLenCm.toFixed(1)} ס"מ`}
+                                  style={{left: 0, width: '100%', top: `${(runningTop / sheetLenCm) * 100}%`, height: `${(unusedLenCm / sheetLenCm) * 100}%`}}
+                                >
+                                  {(unusedLenCm / sheetLenCm) > 0.06 && <span>{unusedLenCm.toFixed(0)} ס"מ לא מנוצל</span>}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             );

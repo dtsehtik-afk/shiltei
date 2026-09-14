@@ -517,31 +517,39 @@ def fit_layout_multi(pieces, roll_w, max_length=None):
         for _ in range(qty):
             units.append((uw, uh, ref))
 
-    # Next-fit-decreasing-height shelf packing: tallest pieces first, fill each shelf's
-    # width left-to-right, start a new shelf once the current one can't fit the next piece —
-    # and once a sheet's total length is full (when bounded), start a new sheet.
+    # First-fit-decreasing-height shelf packing: tallest pieces first; for each piece, try
+    # every still-open shelf on the current physical sheet (not just the most recent one) and
+    # drop it into the first one with enough leftover width — so small pieces fill the gaps
+    # left by wide ones instead of always starting a fresh shelf. Only open a new shelf when
+    # nothing open fits, and only start a new physical sheet (when bounded) once the current
+    # one's length is actually full.
     units.sort(key=lambda u: u[1], reverse=True)
     shelves = []
-    shelf = None
+    open_shelves = []  # shelves on the current physical sheet that might still have room
     sheet_idx = 0
     sheet_used_len = 0.0
     for uw, uh, ref in units:
-        if shelf is not None and shelf["used_width"] + uw <= roll_w + 1e-9:
-            shelf["items"].append({"x": shelf["used_width"], "w": uw, "h": uh, "ref": ref})
-            shelf["used_width"] += uw
-            shelf["height"] = max(shelf["height"], uh)
+        placed = False
+        for shelf in open_shelves:
+            # A shelf's height is fixed by the first (tallest) piece placed in it; a later,
+            # shorter piece can still share its width, just not one taller than it.
+            if shelf["used_width"] + uw <= roll_w + 1e-9 and uh <= shelf["height"] + 1e-9:
+                shelf["items"].append({"x": shelf["used_width"], "w": uw, "h": uh, "ref": ref})
+                shelf["used_width"] += uw
+                placed = True
+                break
+        if placed:
             continue
 
         # Need a new shelf. Does it still fit within the current sheet's remaining length?
-        if shelf is not None:
-            shelves.append(shelf)
-            sheet_used_len += shelf["height"]
         if max_length is not None and sheet_used_len + uh > max_length + 1e-9:
             sheet_idx += 1
             sheet_used_len = 0.0
+            open_shelves = []
         shelf = {"height": uh, "used_width": uw, "items": [{"x": 0, "w": uw, "h": uh, "ref": ref}], "sheet": sheet_idx}
-    if shelf is not None:
         shelves.append(shelf)
+        open_shelves.append(shelf)
+        sheet_used_len += uh
 
     num_sheets = (max(s["sheet"] for s in shelves) + 1) if shelves else 0
 

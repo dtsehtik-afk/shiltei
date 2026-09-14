@@ -717,6 +717,16 @@ body {
 .layout-page { margin-top: 40px; }
 .layout-title { color: #1a2a44; font-weight: bold; margin-bottom: 10px; }
 .layout-meta { color: #555; font-size: 0.9rem; margin-bottom: 20px; }
+.layout-ruler-label {
+  position: absolute; font-size: 0.62rem; color: #888; white-space: nowrap; line-height: 1;
+}
+.layout-unused-strip {
+  position: absolute; box-sizing: border-box;
+  background: repeating-linear-gradient(45deg, rgba(220, 60, 60, 0.12), rgba(220, 60, 60, 0.12) 5px, rgba(220, 60, 60, 0.22) 5px, rgba(220, 60, 60, 0.22) 10px);
+  border: 1px dashed rgba(190, 40, 40, 0.5);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  font-size: 0.62rem; color: #a52a2a; font-weight: 600; overflow: hidden; pointer-events: none;
+}
 .layout-visual {
   border: 2px solid #1a2a44; height: 120px; position: relative; margin-top: 30px;
   background-color: #f9f9f9; width: 100%; max-width: 800px;
