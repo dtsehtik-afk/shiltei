@@ -1020,7 +1020,7 @@ const emptyCartItem = () => ({
 });
 
 // ─── Multi-item order/cart: combined nesting across all items per material ────
-function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, title, initialItems }) {
+function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, title, initialItems, editOrderId }) {
   const [items, setItems] = useState(() => (initialItems && initialItems.length > 0) ? initialItems : [emptyCartItem()]);
   const [userId, setUserId] = useState('');
   const [discountOverride, setDiscountOverride] = useState('');
@@ -1060,7 +1060,15 @@ function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, t
         save_order: true,
       };
       let res;
-      if (isAdmin) {
+      if (editOrderId) {
+        if (isAdmin) {
+          payload.user_id = userId ? parseInt(userId) : null;
+          payload.discount_override = discountOverride !== '' ? parseFloat(discountOverride) : null;
+          res = await apiCall(`/api/admin/orders/${editOrderId}`, 'PUT', payload, token);
+        } else {
+          res = await apiCall(`/api/orders/my/${editOrderId}`, 'PUT', payload, token);
+        }
+      } else if (isAdmin) {
         payload.user_id = userId ? parseInt(userId) : null;
         payload.discount_override = discountOverride !== '' ? parseFloat(discountOverride) : null;
         res = await apiCall('/api/admin/orders/calculate', 'POST', payload, token);
@@ -1078,7 +1086,7 @@ function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, t
   return (
     <div>
       <div className='card'>
-        <h3>{title || '📋 הפקת הצעת מחיר'}</h3>
+        <h3>{editOrderId ? `✏️ עריכת הצעה #${editOrderId}` : (title || '📋 הפקת הצעת מחיר')}</h3>
 
         {isAdmin && (
           <div className='form'>
@@ -1118,7 +1126,7 @@ function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, t
         {error && <div className='alert alert-error' style={{marginTop: '10px'}}>{error}</div>}
         <div style={{marginTop: '14px'}}>
           <button className='btn btn-primary btn-full' onClick={calculate} disabled={loading || items.length === 0}>
-            {loading ? 'מחשב...' : '🧮 חשב הצעה'}
+            {loading ? 'מחשב...' : (editOrderId ? '💾 עדכן הצעה' : '🧮 חשב הצעה')}
           </button>
         </div>
       </div>
@@ -1173,12 +1181,22 @@ function OrderResultView({ result, isAdmin }) {
           {result.discount_amount > 0 && (<>
             <div className='quote-summary-row'><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
             <div className='quote-summary-row'><span>הנחה ({result.discount_percent}%):</span><span style={{color: 'red'}}>-₪{result.discount_amount.toFixed(2)}</span></div>
-            <div className='quote-summary-row'><span>סה"כ אחרי הנחה:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
           </>)}
+          <div className='quote-summary-row'><span>סה"כ לפני מע"מ:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
           <div className='quote-summary-row'><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
           <div className='quote-summary-row'><div className='quote-total-box'>סה"כ לתשלום: {result.total.toFixed(2)} ₪</div></div>
         </div>
       </div>
+
+      {isAdmin && (!result.groups || result.groups.length === 0) &&
+        result.items.some(it => ['print', 'base', 'lamination'].some(role => it[role]?.name && it[role].name !== 'ללא' && it[role].name !== 'לא נמצא')) && (
+        <div className='quote-warnings' style={{marginTop: '16px'}}>
+          <div className='quote-warning-item'>
+            ℹ️ לא הופקה פריסת גיליון — אף אחד מהחומרים שנבחרו לא מוגדר כחומר גליל.
+            כדי לקבל פריסה, יש להגדיר "רוחב מקסימלי" בעריכת החומר (לשונית חומרים).
+          </div>
+        </div>
+      )}
 
       {isAdmin && result.groups?.length > 0 && (
         <div className='print-order-layout'>
@@ -1230,26 +1248,38 @@ function OrderResultView({ result, isAdmin }) {
 }
 
 // ─── Admin: view a previously saved order ───────────────────────────────────────
-function OrderViewModal({ order, token, isAdmin = true, onClose, onDuplicate }) {
+function OrderViewModal({ order, token, isAdmin = true, onClose, onDuplicate, onEdit }) {
   const breakdown = order.breakdown ? JSON.parse(order.breakdown) : null;
-  const [duplicating, setDuplicating] = useState(false);
+  const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
 
+  async function fetchItems() {
+    const endpoint = isAdmin ? `/api/admin/orders/${order.id}` : `/api/orders/my/${order.id}`;
+    const full = await apiCall(endpoint, 'GET', null, token);
+    return (full.items_raw || []).map(it => ({
+      width_cm: it.width_cm, height_cm: it.height_cm, quantity: it.quantity,
+      print_material_id: it.print_material_id || '', base_material_id: it.base_material_id || '',
+      lamination_id: it.lamination_id || '', file_id: it.file_id || null, offset_cm: it.offset_cm || 0,
+    }));
+  }
+
   async function handleDuplicate() {
-    setDuplicating(true);
-    setError('');
+    setBusy('duplicate'); setError('');
     try {
-      const endpoint = isAdmin ? `/api/admin/orders/${order.id}` : `/api/orders/my/${order.id}`;
-      const full = await apiCall(endpoint, 'GET', null, token);
-      const items = (full.items_raw || []).map(it => ({
-        width_cm: it.width_cm, height_cm: it.height_cm, quantity: it.quantity,
-        print_material_id: it.print_material_id || '', base_material_id: it.base_material_id || '',
-        lamination_id: it.lamination_id || '', file_id: it.file_id || null, offset_cm: it.offset_cm || 0,
-      }));
-      onDuplicate(items);
+      onDuplicate(await fetchItems());
     } catch (err) {
       setError(err.message);
-      setDuplicating(false);
+      setBusy('');
+    }
+  }
+
+  async function handleEdit() {
+    setBusy('edit'); setError('');
+    try {
+      onEdit(await fetchItems(), order.id);
+    } catch (err) {
+      setError(err.message);
+      setBusy('');
     }
   }
 
@@ -1264,9 +1294,14 @@ function OrderViewModal({ order, token, isAdmin = true, onClose, onDuplicate }) 
           {breakdown ? <OrderResultView result={breakdown} isAdmin={isAdmin} /> : <div>אין פירוט לשמור</div>}
           {error && <div className="alert alert-error" style={{marginTop: '10px'}}>{error}</div>}
           <div style={{textAlign: 'center', marginTop: '12px'}}>
+            {onEdit && (
+              <button className="btn btn-outline" onClick={handleEdit} disabled={!!busy} style={{marginLeft: '8px'}}>
+                {busy === 'edit' ? 'טוען...' : '✏️ ערוך הצעה'}
+              </button>
+            )}
             {onDuplicate && (
-              <button className="btn btn-outline" onClick={handleDuplicate} disabled={duplicating} style={{marginLeft: '8px'}}>
-                {duplicating ? 'משכפל...' : '🧬 שכפל הצעה'}
+              <button className="btn btn-outline" onClick={handleDuplicate} disabled={!!busy} style={{marginLeft: '8px'}}>
+                {busy === 'duplicate' ? 'משכפל...' : '🧬 שכפל הצעה'}
               </button>
             )}
             <button className="btn btn-primary" onClick={onClose}>סגור</button>
@@ -1293,6 +1328,7 @@ function AdminPanel({ token }) {
   const [viewingOrder, setViewingOrder] = useState(null);
   const [duplicateItems, setDuplicateItems] = useState(null);
   const [duplicateKey, setDuplicateKey] = useState(0);
+  const [editOrderId, setEditOrderId] = useState(null);
   const [products, setProducts] = useState([]);
 
   useEffect(() => { loadMaterials(); loadCategories(); loadUsers(); loadProducts(); }, []);
@@ -1388,14 +1424,17 @@ function AdminPanel({ token }) {
         <h2>👑 פאנל ניהול</h2>
         <div className="tab-group">
           {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["orders","📋 הצעות"],["new-quote","➕ הפק הצעה"]].map(
-            ([k, v]) => <button key={k} className={`tab ${tab===k?"active":""}`} onClick={()=>setTab(k)}>{v}</button>
+            ([k, v]) => <button key={k} className={`tab ${tab===k?"active":""}`} onClick={() => {
+              if (k === 'new-quote' && tab !== 'new-quote') { setDuplicateItems(null); setEditOrderId(null); }
+              setTab(k);
+            }}>{v}</button>
           )}
         </div>
       </div>
 
       {tab === "new-quote" && (
         <OrderCartTab key={duplicateKey} token={token} materials={materials} products={products} users={users}
-          isAdmin={true} onAddUser={addUser} initialItems={duplicateItems} />
+          isAdmin={true} onAddUser={addUser} initialItems={duplicateItems} editOrderId={editOrderId} />
       )}
 
       {tab === "products" && <ProductsAdminTab token={token} materials={materials} />}
@@ -1576,7 +1615,8 @@ function AdminPanel({ token }) {
 
       {viewingOrder && (
         <OrderViewModal order={viewingOrder} token={token} onClose={() => setViewingOrder(null)}
-          onDuplicate={(items) => { setDuplicateItems(items); setDuplicateKey(k => k + 1); setViewingOrder(null); setTab('new-quote'); }} />
+          onDuplicate={(items) => { setDuplicateItems(items); setEditOrderId(null); setDuplicateKey(k => k + 1); setViewingOrder(null); setTab('new-quote'); }}
+          onEdit={(items, id) => { setDuplicateItems(items); setEditOrderId(id); setDuplicateKey(k => k + 1); setViewingOrder(null); setTab('new-quote'); }} />
       )}
 
     </div>
@@ -1592,6 +1632,7 @@ function UserPanel({ token, userName }) {
   const [viewingOrder, setViewingOrder] = useState(null);
   const [duplicateItems, setDuplicateItems] = useState(null);
   const [duplicateKey, setDuplicateKey] = useState(0);
+  const [editOrderId, setEditOrderId] = useState(null);
 
   useEffect(() => {
     apiCall('/api/materials').then(setMaterials);
@@ -1618,14 +1659,17 @@ function UserPanel({ token, userName }) {
         <h2>שלום, {userName}!</h2>
         <p className='subtitle'>בחר חומרים לקבלת הצעת מחיר</p>
         <div className='tab-group'>
-          <button className={`tab ${subTab === 'new' ? 'active' : ''}`} onClick={() => setSubTab('new')}>📋 הצעה חדשה</button>
+          <button className={`tab ${subTab === 'new' ? 'active' : ''}`} onClick={() => {
+            if (subTab !== 'new') { setDuplicateItems(null); setEditOrderId(null); }
+            setSubTab('new');
+          }}>📋 הצעה חדשה</button>
           <button className={`tab ${subTab === 'history' ? 'active' : ''}`} onClick={() => setSubTab('history')}>🕘 ההצעות שלי</button>
         </div>
       </div>
 
       {subTab === 'new' && (
         <OrderCartTab key={duplicateKey} token={token} materials={materials} products={products} users={[]}
-          isAdmin={false} title='📋 מחשבון הצעת מחיר' initialItems={duplicateItems} />
+          isAdmin={false} title='📋 מחשבון הצעת מחיר' initialItems={duplicateItems} editOrderId={editOrderId} />
       )}
 
       {subTab === 'history' && (
@@ -1653,7 +1697,8 @@ function UserPanel({ token, userName }) {
 
       {viewingOrder && (
         <OrderViewModal order={viewingOrder} token={token} isAdmin={false} onClose={() => setViewingOrder(null)}
-          onDuplicate={(items) => { setDuplicateItems(items); setDuplicateKey(k => k + 1); setViewingOrder(null); setSubTab('new'); }} />
+          onDuplicate={(items) => { setDuplicateItems(items); setEditOrderId(null); setDuplicateKey(k => k + 1); setViewingOrder(null); setSubTab('new'); }}
+          onEdit={(items, id) => { setDuplicateItems(items); setEditOrderId(id); setDuplicateKey(k => k + 1); setViewingOrder(null); setSubTab('new'); }} />
       )}
     </div>
   );

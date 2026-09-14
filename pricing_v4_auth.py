@@ -513,14 +513,17 @@ def fit_layout_multi(pieces, roll_w):
     }
 
 
-def apply_material_minimums(row_dict, actual_sqm, actual_length_m, warnings):
+def apply_material_minimums(row_dict, actual_sqm, actual_length_m, item_width_m, warnings):
     """Given a material's already-computed job consumption (`actual_sqm`, and
-    `actual_length_m` if it's a roll material whose layout is known), bump the price up to
-    whatever per-material minimums apply (min_sqm / min_linear_m / min_price), appending an
-    explanatory warning — including how much more can be used for the same price — for each
-    minimum that kicks in. Shared by both single-item quotes and multi-item orders so the
-    same material behaves identically in either flow. Returns (price, actual_sqm) —
-    actual_sqm may itself be raised by a min_sqm minimum."""
+    `actual_length_m` — the length actually consumed, whether from a roll layout or just the
+    item's own height×quantity), bump the price up to whatever per-material minimums apply
+    (min_sqm / min_linear_m / min_price), appending an explanatory warning — including how
+    much more can be used for the same price — for each minimum that kicks in. `item_width_m`
+    is the width to treat the material as if it were a roll of, when the material itself has
+    no configured roll width (max_width=0) — otherwise min_linear_m would be silently
+    unenforceable on any non-roll material. Shared by both single-item quotes and multi-item
+    orders so the same material behaves identically in either flow. Returns
+    (price, actual_sqm) — actual_sqm may itself be raised by a min_sqm minimum."""
     price_per_sqm = row_dict["price_per_sqm"]
     name = row_dict["name"]
 
@@ -539,7 +542,8 @@ def apply_material_minimums(row_dict, actual_sqm, actual_length_m, warnings):
     if min_linear_m > 0 and actual_length_m is not None and actual_length_m < min_linear_m:
         extra_length = min_linear_m - actual_length_m
         max_w = row_dict.get("max_width") or 0
-        min_sqm_from_linear = min_linear_m * (max_w / 100)
+        roll_w_m = (max_w / 100) if max_w > 0 else item_width_m
+        min_sqm_from_linear = min_linear_m * roll_w_m
         min_price_from_linear = price_per_sqm * min_sqm_from_linear
         if min_price_from_linear > price:
             price = min_price_from_linear
@@ -613,9 +617,9 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
             actual_length_m = layout["required_length_cm"] / 100
         else:
             actual_sqm = sqm * data.quantity
-            actual_length_m = None
+            actual_length_m = (data.height_cm * data.quantity) / 100
 
-        price, _ = apply_material_minimums(row_dict, actual_sqm, actual_length_m, warnings)
+        price, _ = apply_material_minimums(row_dict, actual_sqm, actual_length_m, data.width_cm / 100, warnings)
 
         return price, row_dict["name"], row_dict, layout
 
@@ -742,7 +746,7 @@ def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_overrid
 
                 total_len_m = nest["total_length_cm"] / 100
                 actual_sqm = (max_w / 100) * total_len_m
-                group_price, actual_sqm = apply_material_minimums(row_dict, actual_sqm, total_len_m, warnings)
+                group_price, actual_sqm = apply_material_minimums(row_dict, actual_sqm, total_len_m, max_w / 100, warnings)
 
                 flat_areas = {idx: (items[idx].width_cm / 100) * (items[idx].height_cm / 100) * items[idx].quantity
                               for idx in packed_idxs}
@@ -767,7 +771,8 @@ def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_overrid
                 for idx in fit_idxs:
                     it = items[idx]
                     item_sqm = max((it.width_cm / 100) * (it.height_cm / 100), 0.1) * it.quantity
-                    price, _ = apply_material_minimums(row_dict, item_sqm, None, warnings)
+                    item_length_m = (it.height_cm * it.quantity) / 100
+                    price, _ = apply_material_minimums(row_dict, item_sqm, item_length_m, it.width_cm / 100, warnings)
                     item_prices[idx][role] = price
 
     price_role("print", "print_material_id")
@@ -1052,6 +1057,16 @@ def _save_order(conn, items: List[OrderItemIn], breakdown: dict, user_id):
     return order_id
 
 
+def _replace_order(conn, order_id, items: List[OrderItemIn], user_id, discount_override=None):
+    """Editing a quote keeps the original as history and saves the edit as a new quote,
+    linked back to the one it was edited from — same pattern used for single-item quotes."""
+    breakdown = compute_order(conn, items, user_id=user_id, discount_override=discount_override)
+    breakdown["replaces_order_id"] = order_id
+    new_id = _save_order(conn, items, breakdown, user_id)
+    breakdown["id"] = new_id
+    return breakdown
+
+
 @app.post("/api/orders/calculate")
 def calculate_order(data: OrderCalculateRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
     payload = decode_token(credentials.credentials)
@@ -1091,6 +1106,19 @@ def get_my_order(order_id: int, credentials: HTTPAuthorizationCredentials = Depe
     result = dict(row)
     result["items_raw"] = [dict(i) for i in items]
     return result
+
+
+@app.put("/api/orders/my/{order_id}")
+def update_my_order(order_id: int, data: OrderCalculateRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") != "user":
+        raise HTTPException(status_code=403, detail="גישה ללקוחות בלבד")
+    user_id = payload.get("id")
+    with get_db() as conn:
+        existing = conn.execute("SELECT id FROM orders WHERE id=? AND user_id=?", (order_id, user_id)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="הצעה לא נמצאה")
+        return _replace_order(conn, order_id, data.items, user_id)
 
 
 @app.get("/api/products")
@@ -1293,6 +1321,16 @@ def admin_calculate_order(data: OrderCalculateRequest, admin=Depends(get_current
         if data.save_order:
             breakdown["id"] = _save_order(conn, data.items, breakdown, data.user_id)
     return breakdown
+
+
+@app.put("/api/admin/orders/{order_id}")
+def admin_update_order(order_id: int, data: OrderCalculateRequest, admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        existing = conn.execute("SELECT user_id FROM orders WHERE id=?", (order_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="הצעה לא נמצאה")
+        user_id = data.user_id if data.user_id is not None else existing["user_id"]
+        return _replace_order(conn, order_id, data.items, user_id, data.discount_override)
 
 
 @app.get("/api/admin/orders")
