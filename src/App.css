@@ -588,7 +588,13 @@ body {
   box-shadow: 0 20px 60px rgba(108, 63, 197, 0.3);
   width: 100%;
   max-width: 480px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
   animation: modalSlideIn 0.25s ease-out;
+}
+
+.modal-wide {
+  max-width: 860px;
 }
 
 @keyframes modalSlideIn {
@@ -680,6 +686,19 @@ body {
   }
   body.printing-section [data-print-active] .btn { display: none !important; }
   .print-page-break { page-break-before: always; }
+  /* A modal's own scroll/size constraints would otherwise clip the printed content —
+     the printed section is pinned to the page via position:absolute above, so let its
+     ancestors get out of the way entirely rather than crop it to the on-screen box. */
+  body.printing-section .modal-overlay,
+  body.printing-section .modal-content {
+    position: static !important;
+    overflow: visible !important;
+    max-height: none !important;
+    max-width: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
 }
 
 .quote-header {

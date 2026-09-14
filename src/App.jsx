@@ -1159,14 +1159,22 @@ function OrderResultView({ result, isAdmin }) {
           </div>
         </div>
         <table className='quote-table'>
-          <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>הדפסה</th><th>סה"כ</th></tr></thead>
+          <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>חומרים</th><th>סה"כ</th></tr></thead>
           <tbody>
             {result.items.map((it, i) => (
               <tr key={i}>
                 <td>{i + 1}</td>
                 <td dir='ltr'>{it.width_cm} × {it.height_cm}</td>
                 <td>{it.quantity}</td>
-                <td>{it.print?.name}</td>
+                <td>
+                  <div>🖨️ {it.print?.name && it.print.name !== 'ללא' ? it.print.name : 'ללא הדפסה'}</div>
+                  {it.base?.name && it.base.name !== 'ללא' && (
+                    <div style={{fontSize: '0.85em', opacity: 0.75, paddingRight: '14px'}}>↳ 🪵 בסיס: {it.base.name}</div>
+                  )}
+                  {it.lamination?.name && it.lamination.name !== 'ללא' && (
+                    <div style={{fontSize: '0.85em', opacity: 0.75, paddingRight: '14px'}}>↳ ✨ למינציה: {it.lamination.name}</div>
+                  )}
+                </td>
                 <td>₪{it.line_total.toFixed(2)}</td>
               </tr>
             ))}
