@@ -871,7 +871,7 @@ def phone_register(data: PhoneRegister):
             cur = conn.execute(
                 """INSERT INTO users (first_name, last_name, email, phone, company_name, invoice_name, tax_id, password_hash)
                    VALUES (?, ?, ?, ?, ?, ?, ?, '')""",
-                (data.first_name, data.last_name, data.email or "",
+                (data.first_name, data.last_name, data.email or None,
                  phone, data.company_name or "", data.invoice_name or "", data.tax_id or "")
             )
             user_id = cur.lastrowid
@@ -1063,6 +1063,36 @@ def calculate_order(data: OrderCalculateRequest, credentials: HTTPAuthorizationC
     return breakdown
 
 
+@app.get("/api/orders/my")
+def get_my_orders(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") != "user":
+        raise HTTPException(status_code=403, detail="גישה ללקוחות בלבד")
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, total_price, created_at, status FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 100",
+            (payload.get("id"),)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/orders/my/{order_id}")
+def get_my_order(order_id: int, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    payload = decode_token(credentials.credentials)
+    if payload.get("role") != "user":
+        raise HTTPException(status_code=403, detail="גישה ללקוחות בלבד")
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE id=? AND user_id=?", (order_id, payload.get("id"))
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="הצעה לא נמצאה")
+        items = conn.execute("SELECT * FROM order_items WHERE order_id=?", (order_id,)).fetchall()
+    result = dict(row)
+    result["items_raw"] = [dict(i) for i in items]
+    return result
+
+
 @app.get("/api/products")
 def get_products():
     with get_db() as conn:
@@ -1143,7 +1173,7 @@ def admin_create_user(data: AdminUserCreate, admin=Depends(get_current_admin)):
                 """INSERT INTO users (first_name, last_name, email, phone, company_name,
                     invoice_name, tax_id, address, discount_percent, password_hash)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')""",
-                (data.first_name, data.last_name, data.email or "", phone,
+                (data.first_name, data.last_name, data.email or None, phone,
                  data.company_name or "", data.invoice_name or "", data.tax_id or "",
                  data.address or "", data.discount_percent or 0)
             )

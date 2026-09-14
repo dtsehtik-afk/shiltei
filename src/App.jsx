@@ -728,222 +728,6 @@ function ProductsAdminTab({ token, materials }) {
   );
 }
 
-
-
-// ─── Quote View Modal ─────────────────────────────────────────────────────────
-function QuoteViewModal({ quote, token, materials, onClose }) {
-  const bd = quote.breakdown ? JSON.parse(quote.breakdown) : null;
-  const today = new Date(quote.created_at).toLocaleDateString('he-IL');
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content modal-wide" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3>📋 הצעת מחיר #{quote.id}</h3>
-          <button className="modal-close" onClick={onClose}>✕</button>
-        </div>
-        <div style={{padding: '16px'}}>
-          {bd ? (
-            <>
-              <div className="print-quote-view-body">
-                <div className="quote-header">
-                  <div>
-                    <div className="quote-info">תאריך: {today}</div>
-                    <div className="quote-info">לקוח: {quote.user_name || 'אנונימי'}</div>
-                    {quote.phone && <div className="quote-info">טלפון: {quote.phone}</div>}
-                  </div>
-                  <div className="quote-logo">
-                    <svg viewBox="0 0 100 50" fill="none" xmlns="http://www.w3.org/2000/svg" style={{height:'40px'}}>
-                      <path d="M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z" fill="#29B6F6"/>
-                      <path d="M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z" fill="#AB47BC"/>
-                      <path d="M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z" fill="#FFA726"/>
-                    </svg>
-                  </div>
-                </div>
-
-                <table className="quote-table">
-                  <thead><tr><th>פריט</th><th>מידות (מ')</th><th>כמות</th><th>מחיר ליחידה</th><th>סה"כ</th></tr></thead>
-                  <tbody>
-                    <tr>
-                      <td>הדפסה: {bd.print?.name || '-'}<br/>גימור: {bd.lamination?.name || '-'}<br/>רקע: {bd.base?.name || '-'}</td>
-                      <td dir="ltr">{(quote.width_cm/100).toFixed(2)} × {(quote.height_cm/100).toFixed(2)}</td>
-                      <td>{bd.quantity}</td>
-                      <td>₪{(bd.subtotal / bd.quantity).toFixed(2)}</td>
-                      <td>₪{bd.subtotal.toFixed(2)}</td>
-                    </tr>
-                  </tbody>
-                </table>
-                {bd.warnings?.length > 0 && (
-                  <div className="quote-warnings">
-                    {bd.warnings.map((w, i) => <div key={i} className="quote-warning-item">⚠️ {w}</div>)}
-                  </div>
-                )}
-                <div className="quote-summary">
-                  {bd.discount_amount > 0 && (<>
-                    <div className="quote-summary-row"><span>לפני הנחה:</span><span>₪{bd.subtotal.toFixed(2)}</span></div>
-                    <div className="quote-summary-row"><span>הנחה ({bd.discount_percent}%):</span><span style={{color:'red'}}>-₪{bd.discount_amount.toFixed(2)}</span></div>
-                    <div className="quote-summary-row"><span>סה"כ אחרי הנחה:</span><span>₪{bd.total_after_discount.toFixed(2)}</span></div>
-                  </>)}
-                  <div className="quote-summary-row"><span>מע"מ (18%):</span><span>₪{bd.vat_amount.toFixed(2)}</span></div>
-                  <div className="quote-summary-row">
-                    <div className="quote-total-box">סה"כ לתשלום: {bd.total.toFixed(2)} ₪</div>
-                  </div>
-                </div>
-              </div>
-              {bd.layout && (
-                <div className="layout-page print-quote-view-layout" style={{marginTop:'16px'}}>
-                  <h3 className="layout-title">גיליון פריסה — {bd.print?.name}</h3>
-                  <div className="layout-meta">
-                    מידות: {(quote.width_cm/100).toFixed(2)}×{(quote.height_cm/100).toFixed(2)} מ' · כמות: {bd.quantity} · גליל: {bd.layout.roll_width_m} מ'<br/>
-                    {bd.layout.columns} טורים × {bd.layout.rows} שורות · אורך נדרש: {bd.layout.required_length_m} מ' · בזבוז: {bd.layout.waste_percent}%
-                  </div>
-                  <div className="layout-visual">
-                    {Array.from({length: Math.min(bd.layout.columns * bd.layout.rows, bd.quantity)}).map((_, i) => (
-                      <div key={i} className="layout-item-box" style={{
-                        width: `${(1/bd.layout.columns)*100}%`,
-                        height: `${(1/bd.layout.rows)*100}%`,
-                        boxSizing:'border-box', float:'right',
-                        borderBottom: Math.floor(i/bd.layout.columns) < bd.layout.rows-1 ? '1px solid #1a2a44' : 'none'
-                      }}>{i+1}</div>
-                    ))}
-                    <div style={{clear:'both'}} />
-                  </div>
-                </div>
-              )}
-            </>
-          ) : (
-            <div>אין פירוט לשמור</div>
-          )}
-          <div style={{textAlign:'center', marginTop:'16px'}}>
-            <button className="btn btn-outline" onClick={() => printSection('print-quote-view-body')}>🖨️ הדפס הצעת מחיר</button>
-            {bd?.layout && (
-              <button className="btn btn-outline" style={{marginRight:'8px'}} onClick={() => printSection('print-quote-view-layout')}>🖨️ הדפס גיליון פריסה</button>
-            )}
-            <button className="btn btn-primary" style={{marginRight:'8px'}} onClick={onClose}>סגור</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Quote Edit Modal ─────────────────────────────────────────────────────────
-function QuoteEditModal({ quote, token, materials, onClose }) {
-  const [form, setForm] = useState({
-    width_cm: quote.width_cm,
-    height_cm: quote.height_cm,
-    quantity: quote.quantity,
-    print_material_id: quote.print_material_id || '',
-    base_material_id: quote.base_material_id || '',
-    lamination_id: quote.lamination_id || '',
-    discount_override: '',
-  });
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const byCategory = (name) => materials.filter(m => m.category_name === name && m.active);
-
-  async function handleSave(e) {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-    try {
-      const res = await apiCall(`/api/admin/quotes/${quote.id}`, 'PUT', {
-        width_cm: parseFloat(form.width_cm),
-        height_cm: parseFloat(form.height_cm),
-        quantity: parseInt(form.quantity),
-        print_material_id: form.print_material_id ? parseInt(form.print_material_id) : null,
-        base_material_id: form.base_material_id ? parseInt(form.base_material_id) : null,
-        lamination_id: form.lamination_id ? parseInt(form.lamination_id) : null,
-        discount_override: form.discount_override !== '' ? parseFloat(form.discount_override) : null,
-      }, token);
-      setResult(res);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content modal-wide" onClick={e => e.stopPropagation()}>
-        <div className="modal-header">
-          <h3>✏️ עריכת הצעה #{quote.id} — {quote.user_name || 'אנונימי'}</h3>
-          <button className="modal-close" onClick={onClose}>✕</button>
-        </div>
-        <div style={{padding: '16px'}}>
-          <form onSubmit={handleSave} className="form">
-            <div className="form-row">
-              <div className="form-group">
-                <label>רוחב (ס"מ)</label>
-                <input type="number" step="0.1" value={form.width_cm} onChange={e => setForm({...form, width_cm: e.target.value})} required />
-              </div>
-              <div className="form-group">
-                <label>גובה (ס"מ)</label>
-                <input type="number" step="0.1" value={form.height_cm} onChange={e => setForm({...form, height_cm: e.target.value})} required />
-              </div>
-              <div className="form-group">
-                <label>כמות</label>
-                <input type="number" min="1" value={form.quantity} onChange={e => setForm({...form, quantity: e.target.value})} required />
-              </div>
-              <div className="form-group">
-                <label>הנחה ידנית (%) — ריק = לפי לקוח</label>
-                <input type="number" min="0" max="100" step="0.5" placeholder="ללא override" value={form.discount_override}
-                  onChange={e => setForm({...form, discount_override: e.target.value})} />
-              </div>
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label>🖨️ הדפסה</label>
-                <select value={form.print_material_id} onChange={e => setForm({...form, print_material_id: e.target.value})}>
-                  <option value="">ללא</option>
-                  {byCategory('PRINT').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label>🪵 בסיס</label>
-                <select value={form.base_material_id} onChange={e => setForm({...form, base_material_id: e.target.value})}>
-                  <option value="">ללא</option>
-                  {byCategory('BASE').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label>✨ למינציה</label>
-                <select value={form.lamination_id} onChange={e => setForm({...form, lamination_id: e.target.value})}>
-                  <option value="">ללא</option>
-                  {byCategory('LAMINATION').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-                </select>
-              </div>
-            </div>
-            {error && <div className="alert alert-error">{error}</div>}
-            <div className="modal-actions">
-              <button type="submit" className="btn btn-primary" disabled={loading}>
-                {loading ? 'מחשב...' : '💾 עדכן הצעה'}
-              </button>
-              <button type="button" className="btn btn-outline" onClick={onClose}>סגור</button>
-            </div>
-          </form>
-          {result && (
-            <div className="quote-summary" style={{marginTop:'16px', padding:'12px', background:'var(--bg-card)', borderRadius:'8px'}}>
-              <h4>✅ הצעה עודכנה</h4>
-              {result.discount_amount > 0 && (
-                <><div className="quote-summary-row"><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
-                <div className="quote-summary-row"><span>הנחה ({result.discount_percent}%):</span><span>-₪{result.discount_amount.toFixed(2)}</span></div></>
-              )}
-              <div className="quote-summary-row"><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
-              <div className="quote-summary-row">
-                <div className="quote-total-box">סה"כ לתשלום: {result.total.toFixed(2)} ₪</div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ─── Manual object selector (fallback when auto-detection isn't confirmed) ─────
 function ManualCropSelector({ src, onConfirm, onCancel }) {
   const [rect, setRect] = useState(null);
@@ -1236,8 +1020,8 @@ const emptyCartItem = () => ({
 });
 
 // ─── Multi-item order/cart: combined nesting across all items per material ────
-function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, title }) {
-  const [items, setItems] = useState([emptyCartItem()]);
+function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, title, initialItems }) {
+  const [items, setItems] = useState(() => (initialItems && initialItems.length > 0) ? initialItems : [emptyCartItem()]);
   const [userId, setUserId] = useState('');
   const [discountOverride, setDiscountOverride] = useState('');
   const [newCustomerName, setNewCustomerName] = useState('');
@@ -1446,18 +1230,45 @@ function OrderResultView({ result, isAdmin }) {
 }
 
 // ─── Admin: view a previously saved order ───────────────────────────────────────
-function OrderViewModal({ order, onClose }) {
+function OrderViewModal({ order, token, isAdmin = true, onClose, onDuplicate }) {
   const breakdown = order.breakdown ? JSON.parse(order.breakdown) : null;
+  const [duplicating, setDuplicating] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleDuplicate() {
+    setDuplicating(true);
+    setError('');
+    try {
+      const endpoint = isAdmin ? `/api/admin/orders/${order.id}` : `/api/orders/my/${order.id}`;
+      const full = await apiCall(endpoint, 'GET', null, token);
+      const items = (full.items_raw || []).map(it => ({
+        width_cm: it.width_cm, height_cm: it.height_cm, quantity: it.quantity,
+        print_material_id: it.print_material_id || '', base_material_id: it.base_material_id || '',
+        lamination_id: it.lamination_id || '', file_id: it.file_id || null, offset_cm: it.offset_cm || 0,
+      }));
+      onDuplicate(items);
+    } catch (err) {
+      setError(err.message);
+      setDuplicating(false);
+    }
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content modal-wide" onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>📦 הזמנה #{order.id} — {order.user_name || 'אנונימי'}</h3>
+          <h3>📋 הצעה #{order.id}{order.user_name ? ` — ${order.user_name}` : ''}</h3>
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
         <div style={{padding: '16px'}}>
-          {breakdown ? <OrderResultView result={breakdown} isAdmin={true} /> : <div>אין פירוט לשמור</div>}
+          {breakdown ? <OrderResultView result={breakdown} isAdmin={isAdmin} /> : <div>אין פירוט לשמור</div>}
+          {error && <div className="alert alert-error" style={{marginTop: '10px'}}>{error}</div>}
           <div style={{textAlign: 'center', marginTop: '12px'}}>
+            {onDuplicate && (
+              <button className="btn btn-outline" onClick={handleDuplicate} disabled={duplicating} style={{marginLeft: '8px'}}>
+                {duplicating ? 'משכפל...' : '🧬 שכפל הצעה'}
+              </button>
+            )}
             <button className="btn btn-primary" onClick={onClose}>סגור</button>
           </div>
         </div>
@@ -1472,22 +1283,20 @@ function AdminPanel({ token }) {
   const [materials, setMaterials] = useState([]);
   const [categories, setCategories] = useState([]);
   const [users, setUsers] = useState([]);
-  const [quotes, setQuotes] = useState([]);
   const [newMat, setNewMat] = useState({ category_id: '', name: '', price_per_sqm: '', max_width: '', max_length: '', min_price: '', min_linear_m: '', min_unit: 'sqm' });
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
   const [editingMaterial, setEditingMaterial] = useState(null);
   const [editingUser, setEditingUser] = useState(null);
   const [showAddUser, setShowAddUser] = useState(false);
-  const [viewingQuote, setViewingQuote] = useState(null);
-  const [editingQuote, setEditingQuote] = useState(null);
   const [orders, setOrders] = useState([]);
   const [viewingOrder, setViewingOrder] = useState(null);
+  const [duplicateItems, setDuplicateItems] = useState(null);
+  const [duplicateKey, setDuplicateKey] = useState(0);
   const [products, setProducts] = useState([]);
 
   useEffect(() => { loadMaterials(); loadCategories(); loadUsers(); loadProducts(); }, []);
   useEffect(() => {
-    if (tab === 'quotes') loadQuotes();
     if (tab === 'orders') loadOrders();
   }, [tab]);
 
@@ -1506,10 +1315,6 @@ function AdminPanel({ token }) {
   async function loadProducts() {
     const data = await apiCall("/api/products");
     setProducts(data);
-  }
-  async function loadQuotes() {
-    const data = await apiCall("/api/admin/quotes", "GET", null, token);
-    setQuotes(data);
   }
   async function loadOrders() {
     const data = await apiCall("/api/admin/orders", "GET", null, token);
@@ -1582,13 +1387,16 @@ function AdminPanel({ token }) {
       <div className="panel-header">
         <h2>👑 פאנל ניהול</h2>
         <div className="tab-group">
-          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"],["orders","📦 הזמנות"],["new-quote","➕ הפק הצעה"]].map(
+          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["orders","📋 הצעות"],["new-quote","➕ הפק הצעה"]].map(
             ([k, v]) => <button key={k} className={`tab ${tab===k?"active":""}`} onClick={()=>setTab(k)}>{v}</button>
           )}
         </div>
       </div>
 
-      {tab === "new-quote" && <OrderCartTab token={token} materials={materials} products={products} users={users} isAdmin={true} onAddUser={addUser} />}
+      {tab === "new-quote" && (
+        <OrderCartTab key={duplicateKey} token={token} materials={materials} products={products} users={users}
+          isAdmin={true} onAddUser={addUser} initialItems={duplicateItems} />
+      )}
 
       {tab === "products" && <ProductsAdminTab token={token} materials={materials} />}
 
@@ -1741,45 +1549,9 @@ function AdminPanel({ token }) {
         </div>
       )}
 
-      {tab === "quotes" && (
-        <div className="card">
-          <h3>📋 הצעות מחיר ({quotes.length})</h3>
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr><th>לקוח</th><th>מידות (ס"מ)</th><th>מ"ר</th><th>כמות</th><th>סה"כ</th><th>תאריך</th><th>פעולות</th></tr>
-              </thead>
-              <tbody>
-                {quotes.map(q => (
-                  <tr key={q.id}>
-                    <td>{q.user_name || 'אנונימי'}</td>
-                    <td>{q.width_cm} × {q.height_cm}</td>
-                    <td>{q.sqm.toFixed(3)}</td>
-                    <td>{q.quantity}</td>
-                    <td className="price">₪{q.total_price.toFixed(2)}</td>
-                    <td>{new Date(q.created_at).toLocaleDateString('he-IL')}</td>
-                    <td>
-                      <button className='btn btn-sm btn-edit' title='צפה' onClick={() => setViewingQuote(q)}>👁️</button>
-                      <button className='btn btn-sm btn-outline' title='ערוך' onClick={() => setEditingQuote(q)} style={{marginRight:'4px'}}>✏️</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {viewingQuote && (
-        <QuoteViewModal quote={viewingQuote} token={token} materials={materials} onClose={() => setViewingQuote(null)} />
-      )}
-      {editingQuote && (
-        <QuoteEditModal quote={editingQuote} token={token} materials={materials} onClose={() => { setEditingQuote(null); loadQuotes(); }} />
-      )}
-
       {tab === "orders" && (
         <div className="card">
-          <h3>📦 הזמנות ({orders.length})</h3>
+          <h3>📋 הצעות ({orders.length})</h3>
           <div className="table-wrap">
             <table className="table">
               <thead>
@@ -1803,7 +1575,8 @@ function AdminPanel({ token }) {
       )}
 
       {viewingOrder && (
-        <OrderViewModal order={viewingOrder} onClose={() => setViewingOrder(null)} />
+        <OrderViewModal order={viewingOrder} token={token} onClose={() => setViewingOrder(null)}
+          onDuplicate={(items) => { setDuplicateItems(items); setDuplicateKey(k => k + 1); setViewingOrder(null); setTab('new-quote'); }} />
       )}
 
     </div>
@@ -1812,23 +1585,76 @@ function AdminPanel({ token }) {
 
 // ─── User Panel ───────────────────────────────────────────────────────────────
 function UserPanel({ token, userName }) {
+  const [subTab, setSubTab] = useState('new');
   const [materials, setMaterials] = useState([]);
   const [products, setProducts] = useState([]);
+  const [myOrders, setMyOrders] = useState([]);
+  const [viewingOrder, setViewingOrder] = useState(null);
+  const [duplicateItems, setDuplicateItems] = useState(null);
+  const [duplicateKey, setDuplicateKey] = useState(0);
 
   useEffect(() => {
     apiCall('/api/materials').then(setMaterials);
     apiCall('/api/products').then(setProducts);
   }, []);
 
+  useEffect(() => {
+    if (subTab === 'history') loadMyOrders();
+  }, [subTab]);
+
+  async function loadMyOrders() {
+    const data = await apiCall('/api/orders/my', 'GET', null, token);
+    setMyOrders(data);
+  }
+
+  async function viewOrder(o) {
+    const full = await apiCall(`/api/orders/my/${o.id}`, 'GET', null, token);
+    setViewingOrder(full);
+  }
+
   return (
     <div className='panel'>
       <div className='panel-header'>
         <h2>שלום, {userName}!</h2>
         <p className='subtitle'>בחר חומרים לקבלת הצעת מחיר</p>
+        <div className='tab-group'>
+          <button className={`tab ${subTab === 'new' ? 'active' : ''}`} onClick={() => setSubTab('new')}>📋 הצעה חדשה</button>
+          <button className={`tab ${subTab === 'history' ? 'active' : ''}`} onClick={() => setSubTab('history')}>🕘 ההצעות שלי</button>
+        </div>
       </div>
 
-      <OrderCartTab token={token} materials={materials} products={products} users={[]}
-        isAdmin={false} title='📋 מחשבון הצעת מחיר' />
+      {subTab === 'new' && (
+        <OrderCartTab key={duplicateKey} token={token} materials={materials} products={products} users={[]}
+          isAdmin={false} title='📋 מחשבון הצעת מחיר' initialItems={duplicateItems} />
+      )}
+
+      {subTab === 'history' && (
+        <div className='card'>
+          <h3>🕘 ההצעות שלי ({myOrders.length})</h3>
+          <div className='table-wrap'>
+            <table className='table'>
+              <thead><tr><th>מספר</th><th>סה"כ</th><th>תאריך</th><th>פעולות</th></tr></thead>
+              <tbody>
+                {myOrders.map(o => (
+                  <tr key={o.id}>
+                    <td>#{o.id}</td>
+                    <td className='price'>₪{o.total_price.toFixed(2)}</td>
+                    <td>{new Date(o.created_at).toLocaleDateString('he-IL')}</td>
+                    <td>
+                      <button className='btn btn-sm btn-edit' title='צפה' onClick={() => viewOrder(o)}>👁️</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {viewingOrder && (
+        <OrderViewModal order={viewingOrder} token={token} isAdmin={false} onClose={() => setViewingOrder(null)}
+          onDuplicate={(items) => { setDuplicateItems(items); setDuplicateKey(k => k + 1); setViewingOrder(null); setSubTab('new'); }} />
+      )}
     </div>
   );
 }
