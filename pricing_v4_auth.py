@@ -472,13 +472,70 @@ def _fit_layout(item_w, item_h, qty, roll_w, max_length=None):
     }
 
 
+def _skyline_best_fit(skyline, uw, uh, roll_w, max_length):
+    """Find the lowest (then left-most) x position on `skyline` where a uw×uh piece fits —
+    the standard "bottom-left" skyline placement rule. `skyline` is a list of {"x", "width",
+    "y"} segments, left-to-right, covering [0, roll_w) with no gaps. Returns (x, y) or None."""
+    best = None
+    n = len(skyline)
+    for i in range(n):
+        x0 = skyline[i]["x"]
+        if x0 + uw > roll_w + 1e-9:
+            continue
+        covered = 0.0
+        max_y = 0.0
+        j = i
+        while covered < uw - 1e-9 and j < n:
+            max_y = max(max_y, skyline[j]["y"])
+            covered += skyline[j]["width"]
+            j += 1
+        if covered < uw - 1e-9:
+            continue  # ran off the right edge before covering the full width
+        if max_length is not None and max_y + uh > max_length + 1e-9:
+            continue
+        if best is None or (max_y, x0) < (best[0], best[1]):
+            best = (max_y, x0)
+    return None if best is None else (best[1], best[0])
+
+
+def _skyline_place(skyline, x, width, new_y):
+    """Update `skyline` in place to reflect a piece now occupying [x, x+width) up to new_y —
+    splitting any segment it partially overlaps and merging same-height neighbors back
+    together afterwards so the segment list doesn't grow unbounded."""
+    x_end = x + width
+    new_segments = []
+    for seg in skyline:
+        s0, s1 = seg["x"], seg["x"] + seg["width"]
+        if s1 <= x + 1e-9 or s0 >= x_end - 1e-9:
+            new_segments.append(seg)
+            continue
+        if s0 < x - 1e-9:
+            new_segments.append({"x": s0, "width": x - s0, "y": seg["y"]})
+        if s1 > x_end + 1e-9:
+            new_segments.append({"x": x_end, "width": s1 - x_end, "y": seg["y"]})
+    new_segments.append({"x": x, "width": width, "y": new_y})
+    new_segments.sort(key=lambda s: s["x"])
+    merged = []
+    for seg in new_segments:
+        if merged and abs(merged[-1]["y"] - seg["y"]) < 1e-6 and abs(merged[-1]["x"] + merged[-1]["width"] - seg["x"]) < 1e-6:
+            merged[-1]["width"] += seg["width"]
+        else:
+            merged.append(dict(seg))
+    skyline[:] = merged
+
+
 def fit_layout_multi(pieces, roll_w, max_length=None):
-    """Simple shelf (row) bin-packing of many differently-sized pieces onto a roll/sheet of
+    """Skyline (bottom-left) bin-packing of many differently-sized pieces onto a roll/sheet of
     width `roll_w` (cm), for a whole *order* of items sharing the same material — or, later,
     for a batch of items pooled from many separate approved orders/quotes. Deliberately kept
     order-agnostic (it only knows about pieces, not who they belong to) so the same function
     can drive both today's per-order nesting and a future "nest everything approved for
     production today" batch job without changes.
+
+    Unlike a fixed-row ("shelf") packer, the skyline tracks the actual height profile across
+    the sheet's width, so a small piece can drop into the leftover gap beside — or on top of —
+    a taller one on *any* physical sheet already opened, not just settle for stretching across
+    a whole row sized for the tallest piece placed so far.
 
     `pieces`: list of {"w", "h", "qty", "ref"} dicts (cm; `ref` is an opaque id the caller
     attaches to trace a placement back to its source item/order).
@@ -486,13 +543,14 @@ def fit_layout_multi(pieces, roll_w, max_length=None):
     `max_length`, when set, means this is a bounded sheet (e.g. a 100×100cm rigid board), not
     an endless roll — the length axis is capped too, and once one sheet's length is full the
     packing spills onto another physical sheet (`num_sheets` > 1) rather than an implied
-    infinite strip. Each shelf is tagged with which sheet it belongs to. When `max_length` is
-    None, everything is one continuous roll (num_sheets stays 1, sheet is meaningless).
+    infinite strip. When `max_length` is None, everything is one continuous roll (num_sheets
+    stays 1).
 
-    Returns {"shelves": [...], "total_length_cm": float, "used_area_cm2": float, "unfit": [...],
-    "num_sheets": int} — `unfit` lists pieces that don't fit the roll width, or (when bounded)
-    a single sheet's length, at all in either orientation; the caller prices/warns about those
-    separately."""
+    Returns {"placements": [...], "total_length_cm": float, "used_area_cm2": float,
+    "unfit": [...], "num_sheets": int, "sheet_length_cm": ...} — each placement is
+    {"sheet", "x", "y", "w", "h", "ref"} (all cm, y measured from the start of its sheet);
+    `unfit` lists pieces that don't fit the roll width, or (when bounded) a single sheet's
+    length, at all in either orientation; the caller prices/warns about those separately."""
     units = []
     unfit = []
     for p in pieces:
@@ -517,51 +575,53 @@ def fit_layout_multi(pieces, roll_w, max_length=None):
         for _ in range(qty):
             units.append((uw, uh, ref))
 
-    # First-fit-decreasing-height shelf packing: tallest pieces first; for each piece, try
-    # every still-open shelf on the current physical sheet (not just the most recent one) and
-    # drop it into the first one with enough leftover width — so small pieces fill the gaps
-    # left by wide ones instead of always starting a fresh shelf. Only open a new shelf when
-    # nothing open fits, and only start a new physical sheet (when bounded) once the current
-    # one's length is actually full.
+    # Tallest pieces first (classic decreasing-height ordering) — placing the big, hard-to-fit
+    # pieces before the small, flexible ones gives the skyline its shape early, so the small
+    # ones can then be dropped into whatever gaps remain, on any sheet already opened.
     units.sort(key=lambda u: u[1], reverse=True)
-    shelves = []
-    open_shelves = []  # shelves on the current physical sheet that might still have room
-    sheet_idx = 0
-    sheet_used_len = 0.0
+
+    sheet_skylines = [[{"x": 0.0, "width": roll_w, "y": 0.0}]]
+    placements = []
     for uw, uh, ref in units:
         placed = False
-        for shelf in open_shelves:
-            # A shelf's height is fixed by the first (tallest) piece placed in it; a later,
-            # shorter piece can still share its width, just not one taller than it.
-            if shelf["used_width"] + uw <= roll_w + 1e-9 and uh <= shelf["height"] + 1e-9:
-                shelf["items"].append({"x": shelf["used_width"], "w": uw, "h": uh, "ref": ref})
-                shelf["used_width"] += uw
-                placed = True
-                break
+        for sheet_idx, skyline in enumerate(sheet_skylines):
+            pos = _skyline_best_fit(skyline, uw, uh, roll_w, max_length)
+            if pos is None:
+                continue
+            x, y = pos
+            _skyline_place(skyline, x, uw, y + uh)
+            placements.append({"sheet": sheet_idx, "x": x, "y": y, "w": uw, "h": uh, "ref": ref})
+            placed = True
+            break
         if placed:
             continue
 
-        # Need a new shelf. Does it still fit within the current sheet's remaining length?
-        if max_length is not None and sheet_used_len + uh > max_length + 1e-9:
-            sheet_idx += 1
-            sheet_used_len = 0.0
-            open_shelves = []
-        shelf = {"height": uh, "used_width": uw, "items": [{"x": 0, "w": uw, "h": uh, "ref": ref}], "sheet": sheet_idx}
-        shelves.append(shelf)
-        open_shelves.append(shelf)
-        sheet_used_len += uh
+        # Doesn't fit any sheet opened so far.
+        if max_length is None:
+            # One endless roll — it must simply not fit the width, which was already checked
+            # above; nothing more to try.
+            unfit.append({"w": uw, "h": uh, "ref": ref})
+            continue
+        sheet_skylines.append([{"x": 0.0, "width": roll_w, "y": 0.0}])
+        pos = _skyline_best_fit(sheet_skylines[-1], uw, uh, roll_w, max_length)
+        if pos is None:
+            unfit.append({"w": uw, "h": uh, "ref": ref})
+            continue
+        x, y = pos
+        _skyline_place(sheet_skylines[-1], x, uw, y + uh)
+        placements.append({"sheet": len(sheet_skylines) - 1, "x": x, "y": y, "w": uw, "h": uh, "ref": ref})
 
-    num_sheets = (max(s["sheet"] for s in shelves) + 1) if shelves else 0
+    num_sheets = len(sheet_skylines) if placements else 0
 
     if max_length is None:
-        total_length = sum(s["height"] for s in shelves)
+        total_length = max((p["y"] + p["h"] for p in placements), default=0.0)
     else:
         # Billed as whole sheets — a rigid board can't be bought partially.
         total_length = num_sheets * max_length
 
-    used_area = sum(it["w"] * it["h"] for s in shelves for it in s["items"])
+    used_area = sum(p["w"] * p["h"] for p in placements)
     return {
-        "shelves": shelves,
+        "placements": placements,
         "total_length_cm": total_length,
         "used_area_cm2": used_area,
         "unfit": unfit,
@@ -825,7 +885,7 @@ def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_overrid
                     "required_length_m": round(total_len_m, 2),
                     "waste_percent": round(waste_percent, 1),
                     "price": round(group_price, 2),
-                    "shelves": nest["shelves"],
+                    "placements": nest["placements"],
                     "item_refs": packed_idxs,
                     "num_sheets": nest["num_sheets"],
                     "sheet_length_m": round(sheet_cap / 100, 2) if sheet_cap else None,
