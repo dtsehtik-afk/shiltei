@@ -434,10 +434,10 @@ function EditMaterialModal({ material, categories, onSave, onClose }) {
               </select>
               {form.min_unit === 'sqm' ? (
                 <input type="number" step="0.01" placeholder="0.1" value={form.min_sqm}
-                  onChange={e => setForm({...form, min_sqm: e.target.value})} style={{flex: 1}} />
+                  onChange={e => setForm({...form, min_sqm: e.target.value})} style={{flex: 1, minWidth: '90px'}} />
               ) : (
                 <input type="number" step="0.1" placeholder='למשל: 1.5' value={form.min_linear_m}
-                  onChange={e => setForm({...form, min_linear_m: e.target.value})} style={{flex: 1}} />
+                  onChange={e => setForm({...form, min_linear_m: e.target.value})} style={{flex: 1, minWidth: '90px'}} />
               )}
             </div>
           </div>
@@ -1202,35 +1202,54 @@ function OrderResultView({ result, isAdmin }) {
       {isAdmin && result.groups?.length > 0 && (
         <div className='print-order-layout'>
           {result.groups.map((g, gi) => {
-            const totalLenCm = g.required_length_m * 100;
             const rollWCm = g.roll_width_m * 100;
-            let runningTop = 0;
+            const isBounded = !!g.sheet_length_m;
+            const numSheets = g.num_sheets || 1;
+            const sheetLenCm = isBounded ? g.sheet_length_m * 100 : g.required_length_m * 100;
+            // Bounded (rigid-sheet) materials: split shelves by which physical sheet they're
+            // on, since it's several separate boards, not one continuous strip.
+            const sheets = Array.from({length: numSheets}, (_, si) => g.shelves.filter(s => (s.sheet ?? 0) === si));
+
             return (
               <div key={gi} className='layout-page' style={{marginTop: '16px'}}>
                 <h3 className='layout-title'>גיליון פריסה — {g.material_name} ({ORDER_ROLE_LABEL[g.role] || g.role})</h3>
                 <div className='layout-meta'>
-                  רוחב גליל: {g.roll_width_m} מ' · אורך נדרש: {g.required_length_m} מ' · בזבוז: {g.waste_percent}%
+                  {isBounded
+                    ? <>גודל לוח: {g.roll_width_m}×{g.sheet_length_m} מ' · נדרשים {numSheets} לוחות · בזבוז: {g.waste_percent}%</>
+                    : <>רוחב גליל: {g.roll_width_m} מ' · אורך נדרש: {g.required_length_m} מ' · בזבוז: {g.waste_percent}%</>}
                 </div>
-                <div style={{position: 'relative', width: '100%', paddingBottom: `${(totalLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff', marginTop: '8px'}}>
-                  {g.shelves.map((shelf, si) => {
-                    const top = runningTop;
-                    runningTop += shelf.height;
-                    return (
-                      <div key={si} style={{
-                        position: 'absolute', left: 0, width: '100%',
-                        top: `${(top / totalLenCm) * 100}%`, height: `${(shelf.height / totalLenCm) * 100}%`,
-                      }}>
-                        {shelf.items.map((it, ii) => (
-                          <div key={ii} style={{
-                            position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
-                            width: `${(it.w / rollWCm) * 100}%`, height: '100%',
-                            border: '1px solid #6c3fc5', boxSizing: 'border-box',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
-                          }}>#{it.ref + 1}</div>
-                        ))}
+                <div style={{display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '8px'}}>
+                  {sheets.map((shelves, si) => (
+                    <div key={si} style={{width: numSheets > 1 ? '200px' : '100%'}}>
+                      {numSheets > 1 && (
+                        <div style={{fontSize: '0.78rem', marginBottom: '4px', opacity: 0.75}}>לוח {si + 1} מתוך {numSheets}</div>
+                      )}
+                      <div style={{position: 'relative', width: '100%', paddingBottom: `${(sheetLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff'}}>
+                        {(() => {
+                          let runningTop = 0;
+                          return shelves.map((shelf, shi) => {
+                            const top = runningTop;
+                            runningTop += shelf.height;
+                            return (
+                              <div key={shi} style={{
+                                position: 'absolute', left: 0, width: '100%',
+                                top: `${(top / sheetLenCm) * 100}%`, height: `${(shelf.height / sheetLenCm) * 100}%`,
+                              }}>
+                                {shelf.items.map((it, ii) => (
+                                  <div key={ii} style={{
+                                    position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
+                                    width: `${(it.w / rollWCm) * 100}%`, height: '100%',
+                                    border: '1px solid #6c3fc5', boxSizing: 'border-box',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
+                                  }}>#{it.ref + 1}</div>
+                                ))}
+                              </div>
+                            );
+                          });
+                        })()}
                       </div>
-                    );
-                  })}
+                    </div>
+                  ))}
                 </div>
               </div>
             );
@@ -1467,16 +1486,16 @@ function AdminPanel({ token }) {
                 <input type='number' step='0.01' placeholder='ללא' value={newMat.min_price}
                   onChange={e => setNewMat({...newMat, min_price: e.target.value})} />
               </div>
-              <div className='form-group'>
+              <div className='form-group' style={{minWidth: '240px'}}>
                 <label>מינימום לחיוב</label>
-                <div style={{display:'flex', gap:'4px'}}>
-                  <select value={newMat.min_unit} onChange={e => setNewMat({...newMat, min_unit: e.target.value})} style={{flex:'0 0 110px'}}>
+                <div style={{display:'flex', gap:'6px'}}>
+                  <select value={newMat.min_unit} onChange={e => setNewMat({...newMat, min_unit: e.target.value})} style={{flex:'0 0 100px'}}>
                     <option value='sqm'>מ"ר</option>
                     <option value='linear'>מ' רץ</option>
                   </select>
                   {newMat.min_unit === 'sqm'
-                    ? <input type='number' step='0.01' placeholder='0.1' value={newMat.min_sqm || ''} onChange={e => setNewMat({...newMat, min_sqm: e.target.value})} style={{flex:1}} />
-                    : <input type='number' step='0.1' placeholder='1.0' value={newMat.min_linear_m} onChange={e => setNewMat({...newMat, min_linear_m: e.target.value})} style={{flex:1}} />
+                    ? <input type='number' step='0.01' placeholder='0.1' value={newMat.min_sqm || ''} onChange={e => setNewMat({...newMat, min_sqm: e.target.value})} style={{flex: 1, minWidth: '90px'}} />
+                    : <input type='number' step='0.1' placeholder='1.0' value={newMat.min_linear_m} onChange={e => setNewMat({...newMat, min_linear_m: e.target.value})} style={{flex: 1, minWidth: '90px'}} />
                   }
                 </div>
               </div>

@@ -427,36 +427,52 @@ class ProductUpdate(BaseModel):
 
 
 # ─── Shared Quote Calculation Logic ────────────────────────────────────────────
-def _fit_layout(item_w, item_h, qty, roll_w):
-    """Best-fit packing of `qty` items (item_w x item_h cm) across a roll of width roll_w (cm).
-    Returns dict with cols, rows, is_rotated, required_length_cm — or None if the item doesn't
-    fit the roll width in either orientation."""
+def _fit_layout(item_w, item_h, qty, roll_w, max_length=None):
+    """Best-fit packing of `qty` identical items (item_w x item_h cm) across a roll/sheet of
+    width roll_w (cm). `max_length`, when set, means this is a bounded sheet, not an endless
+    roll — extra rows spill onto additional physical sheets (num_sheets > 1) instead of an
+    implied infinite strip. Returns dict with cols, rows, is_rotated, required_length_cm,
+    num_sheets, sheet_length_cm — or None if the item doesn't fit the roll width (or, when
+    bounded, a single sheet) in either orientation."""
     if roll_w <= 0 or item_w <= 0 or item_h <= 0 or qty <= 0:
         return None
 
+    def plan(cols, row_len):
+        if cols <= 0:
+            return None
+        rows_needed = (qty + cols - 1) // cols
+        if max_length is None:
+            return rows_needed * row_len, 1
+        rows_per_sheet = int(max_length // row_len)
+        if rows_per_sheet <= 0:
+            return None
+        sheets = (rows_needed + rows_per_sheet - 1) // rows_per_sheet
+        return sheets * max_length, sheets
+
     cols_upright = int(roll_w // item_w)
-    len_upright = float('inf')
-    if cols_upright > 0:
-        rows_upright = (qty + cols_upright - 1) // cols_upright
-        len_upright = rows_upright * item_h
+    plan_upright = plan(cols_upright, item_h)
 
     cols_rot = int(roll_w // item_h)
-    len_rot = float('inf')
-    if cols_rot > 0:
-        rows_rot = (qty + cols_rot - 1) // cols_rot
-        len_rot = rows_rot * item_w
+    plan_rot = plan(cols_rot, item_w)
 
-    best_len = min(len_upright, len_rot)
-    if best_len == float('inf'):
+    candidates = []
+    if plan_upright:
+        candidates.append((plan_upright[0], plan_upright[1], False, cols_upright))
+    if plan_rot:
+        candidates.append((plan_rot[0], plan_rot[1], True, cols_rot))
+    if not candidates:
         return None
 
-    is_rotated = len_rot < len_upright
-    cols = cols_rot if is_rotated else cols_upright
+    best_len, best_sheets, is_rotated, cols = min(candidates, key=lambda c: c[0])
     rows_n = (qty + cols - 1) // cols
-    return {"cols": cols, "rows": rows_n, "is_rotated": is_rotated, "required_length_cm": best_len}
+    return {
+        "cols": cols, "rows": rows_n, "is_rotated": is_rotated,
+        "required_length_cm": best_len, "num_sheets": best_sheets,
+        "sheet_length_cm": max_length,
+    }
 
 
-def fit_layout_multi(pieces, roll_w):
+def fit_layout_multi(pieces, roll_w, max_length=None):
     """Simple shelf (row) bin-packing of many differently-sized pieces onto a roll/sheet of
     width `roll_w` (cm), for a whole *order* of items sharing the same material — or, later,
     for a batch of items pooled from many separate approved orders/quotes. Deliberately kept
@@ -467,9 +483,16 @@ def fit_layout_multi(pieces, roll_w):
     `pieces`: list of {"w", "h", "qty", "ref"} dicts (cm; `ref` is an opaque id the caller
     attaches to trace a placement back to its source item/order).
 
-    Returns {"shelves": [...], "total_length_cm": float, "used_area_cm2": float, "unfit": [...]}
-    — `unfit` lists pieces that don't fit the roll width at all (in either orientation); the
-    caller is responsible for pricing/warning about those separately."""
+    `max_length`, when set, means this is a bounded sheet (e.g. a 100×100cm rigid board), not
+    an endless roll — the length axis is capped too, and once one sheet's length is full the
+    packing spills onto another physical sheet (`num_sheets` > 1) rather than an implied
+    infinite strip. Each shelf is tagged with which sheet it belongs to. When `max_length` is
+    None, everything is one continuous roll (num_sheets stays 1, sheet is meaningless).
+
+    Returns {"shelves": [...], "total_length_cm": float, "used_area_cm2": float, "unfit": [...],
+    "num_sheets": int} — `unfit` lists pieces that don't fit the roll width, or (when bounded)
+    a single sheet's length, at all in either orientation; the caller prices/warns about those
+    separately."""
     units = []
     unfit = []
     for p in pieces:
@@ -483,33 +506,59 @@ def fit_layout_multi(pieces, roll_w):
             continue
         # Prefer the given orientation; rotate only if it's the only one that fits.
         uw, uh = (w, h) if fits_upright else (h, w)
+        if max_length is not None and uh > max_length:
+            # Try the other orientation before giving up — its own "length" side might fit.
+            uw2, uh2 = uh, uw
+            if uw2 <= roll_w and uh2 <= max_length:
+                uw, uh = uw2, uh2
+            else:
+                unfit.append(p)
+                continue
         for _ in range(qty):
             units.append((uw, uh, ref))
 
     # Next-fit-decreasing-height shelf packing: tallest pieces first, fill each shelf's
-    # width left-to-right, start a new shelf once the current one can't fit the next piece.
+    # width left-to-right, start a new shelf once the current one can't fit the next piece —
+    # and once a sheet's total length is full (when bounded), start a new sheet.
     units.sort(key=lambda u: u[1], reverse=True)
     shelves = []
     shelf = None
+    sheet_idx = 0
+    sheet_used_len = 0.0
     for uw, uh, ref in units:
         if shelf is not None and shelf["used_width"] + uw <= roll_w + 1e-9:
             shelf["items"].append({"x": shelf["used_width"], "w": uw, "h": uh, "ref": ref})
             shelf["used_width"] += uw
             shelf["height"] = max(shelf["height"], uh)
-        else:
-            if shelf is not None:
-                shelves.append(shelf)
-            shelf = {"height": uh, "used_width": uw, "items": [{"x": 0, "w": uw, "h": uh, "ref": ref}]}
+            continue
+
+        # Need a new shelf. Does it still fit within the current sheet's remaining length?
+        if shelf is not None:
+            shelves.append(shelf)
+            sheet_used_len += shelf["height"]
+        if max_length is not None and sheet_used_len + uh > max_length + 1e-9:
+            sheet_idx += 1
+            sheet_used_len = 0.0
+        shelf = {"height": uh, "used_width": uw, "items": [{"x": 0, "w": uw, "h": uh, "ref": ref}], "sheet": sheet_idx}
     if shelf is not None:
         shelves.append(shelf)
 
-    total_length = sum(s["height"] for s in shelves)
+    num_sheets = (max(s["sheet"] for s in shelves) + 1) if shelves else 0
+
+    if max_length is None:
+        total_length = sum(s["height"] for s in shelves)
+    else:
+        # Billed as whole sheets — a rigid board can't be bought partially.
+        total_length = num_sheets * max_length
+
     used_area = sum(it["w"] * it["h"] for s in shelves for it in s["items"])
     return {
         "shelves": shelves,
         "total_length_cm": total_length,
         "used_area_cm2": used_area,
         "unfit": unfit,
+        "num_sheets": max(num_sheets, 1),
+        "sheet_length_cm": max_length,
     }
 
 
@@ -610,7 +659,7 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
         # (including layout waste), not against the flat per-item area.
         layout = None
         if max_w > 0:
-            layout = _fit_layout(data.width_cm, data.height_cm, data.quantity, max_w)
+            layout = _fit_layout(data.width_cm, data.height_cm, data.quantity, max_w, max_l if max_l > 0 else None)
 
         if layout:
             actual_sqm = (max_w / 100) * (layout["required_length_cm"] / 100)
@@ -649,7 +698,9 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
             "columns": print_layout["cols"],
             "rows": print_layout["rows"],
             "is_rotated": print_layout["is_rotated"],
-            "waste_percent": round(waste_percent, 1)
+            "waste_percent": round(waste_percent, 1),
+            "num_sheets": print_layout["num_sheets"],
+            "sheet_length_m": round(print_layout["sheet_length_cm"] / 100, 2) if print_layout["sheet_length_cm"] else None,
         }
 
     return {
@@ -735,11 +786,13 @@ def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_overrid
                 continue
 
             if max_w > 0:
+                sheet_cap = max_l if max_l > 0 else None
                 pieces = [{"w": items[idx].width_cm, "h": items[idx].height_cm,
                            "qty": items[idx].quantity, "ref": idx} for idx in fit_idxs]
-                nest = fit_layout_multi(pieces, max_w)
+                nest = fit_layout_multi(pieces, max_w, sheet_cap)
                 for p in nest["unfit"]:
-                    warnings.append(f"מידות חריגות עבור '{name}' — פריט #{p['ref'] + 1} לא נכנס לרוחב הגליל ({max_w} ס\"מ)")
+                    dims = f"{max_w}×{max_l} ס\"מ" if sheet_cap else f"{max_w} ס\"מ (רוחב)"
+                    warnings.append(f"מידות חריגות עבור '{name}' — פריט #{p['ref'] + 1} לא נכנס בגבולות החומר ({dims})")
                 packed_idxs = [idx for idx in fit_idxs if idx not in {p["ref"] for p in nest["unfit"]}]
                 if not packed_idxs:
                     continue
@@ -766,6 +819,8 @@ def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_overrid
                     "price": round(group_price, 2),
                     "shelves": nest["shelves"],
                     "item_refs": packed_idxs,
+                    "num_sheets": nest["num_sheets"],
+                    "sheet_length_m": round(sheet_cap / 100, 2) if sheet_cap else None,
                 })
             else:
                 for idx in fit_idxs:
