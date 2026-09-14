@@ -235,18 +235,6 @@ function LoginScreen({ onLogin }) {
                 required
               />
             </div>
-            <div className="form-row">
-            <div className="form-group">
-              <label>רוחב מקס' (ס"מ)</label>
-              <input type="number" step="0.1" value={form.max_width}
-                onChange={e => setForm({...form, max_width: e.target.value})} />
-            </div>
-            <div className="form-group">
-              <label>אורך מקס' (ס"מ)</label>
-              <input type="number" step="0.1" value={form.max_length}
-                onChange={e => setForm({...form, max_length: e.target.value})} />
-            </div>
-          </div>
           {error && <div className="alert alert-error">{error}</div>}
             <button type="submit" className="btn btn-primary btn-full" disabled={loading}>
               {loading ? "מתחבר..." : "כניסה"}
