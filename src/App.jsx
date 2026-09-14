@@ -1152,27 +1152,70 @@ function OrderResultView({ result, isAdmin }) {
           </div>
         </div>
         <table className='quote-table'>
-          <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>חומרים</th><th>סה"כ</th></tr></thead>
+          <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>חומרים</th></tr></thead>
           <tbody>
-            {result.items.map((it, i) => (
-              <tr key={i}>
-                <td>{i + 1}</td>
-                <td dir='ltr'>{it.width_cm} × {it.height_cm}</td>
-                <td>{it.quantity}</td>
-                <td>
-                  <div>🖨️ {it.print?.name && it.print.name !== 'ללא' ? it.print.name : 'ללא הדפסה'}</div>
-                  {it.base?.name && it.base.name !== 'ללא' && (
-                    <div style={{fontSize: '0.85em', opacity: 0.75, paddingRight: '14px'}}>↳ 🪵 בסיס: {it.base.name}</div>
-                  )}
-                  {it.lamination?.name && it.lamination.name !== 'ללא' && (
-                    <div style={{fontSize: '0.85em', opacity: 0.75, paddingRight: '14px'}}>↳ ✨ למינציה: {it.lamination.name}</div>
-                  )}
-                </td>
-                <td>₪{it.line_total.toFixed(2)}</td>
-              </tr>
-            ))}
+            {result.items.map((it, i) => {
+              const itemSqm = (it.width_cm / 100) * (it.height_cm / 100) * it.quantity;
+              return (
+                <tr key={i}>
+                  <td>{i + 1}</td>
+                  <td dir='ltr'>{it.width_cm} × {it.height_cm}</td>
+                  <td>{it.quantity}</td>
+                  <td>
+                    <div style={{display: 'flex', justifyContent: 'space-between', gap: '10px'}}>
+                      <span>🖨️ {it.print?.name && it.print.name !== 'ללא' ? it.print.name : 'ללא הדפסה'}</span>
+                      {it.print?.price > 0 && <span>{itemSqm.toFixed(2)} מ"ר · ₪{it.print.price.toFixed(2)}</span>}
+                    </div>
+                    {it.base?.name && it.base.name !== 'ללא' && (
+                      <div style={{display: 'flex', justifyContent: 'space-between', gap: '10px', fontSize: '0.85em', opacity: 0.75, paddingRight: '14px'}}>
+                        <span>↳ 🪵 בסיס: {it.base.name}</span>
+                        <span>{itemSqm.toFixed(2)} מ"ר · ₪{it.base.price.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {it.lamination?.name && it.lamination.name !== 'ללא' && (
+                      <div style={{display: 'flex', justifyContent: 'space-between', gap: '10px', fontSize: '0.85em', opacity: 0.75, paddingRight: '14px'}}>
+                        <span>↳ ✨ למינציה: {it.lamination.name}</span>
+                        <span>{itemSqm.toFixed(2)} מ"ר · ₪{it.lamination.price.toFixed(2)}</span>
+                      </div>
+                    )}
+                    <div style={{display: 'flex', justifyContent: 'space-between', gap: '10px', fontWeight: 700, marginTop: '4px', paddingTop: '4px', borderTop: '1px dashed var(--border, #ddd)'}}>
+                      <span>סה"כ לפריט</span>
+                      <span>₪{it.line_total.toFixed(2)}</span>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
+        {(() => {
+          const byMaterial = {};
+          for (const it of result.items) {
+            for (const role of ['print', 'base', 'lamination']) {
+              const m = it[role];
+              if (m?.name && m.name !== 'ללא' && m.name !== 'לא נמצא' && m.price > 0) {
+                byMaterial[m.name] = (byMaterial[m.name] || 0) + m.price;
+              }
+            }
+          }
+          const rows = Object.entries(byMaterial);
+          if (rows.length < 2) return null;
+          return (
+            <div style={{marginTop: '12px'}}>
+              <div style={{fontWeight: 700, fontSize: '0.9rem', marginBottom: '6px'}}>סיכום לפי חומר</div>
+              <table className='quote-table'>
+                <tbody>
+                  {rows.map(([name, total]) => (
+                    <tr key={name}>
+                      <td>{name}</td>
+                      <td style={{textAlign: 'left'}}>₪{total.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+        })()}
         {result.warnings?.length > 0 && (
           <div className='quote-warnings'>
             {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
