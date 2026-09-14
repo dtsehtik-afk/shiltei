@@ -944,231 +944,6 @@ function QuoteEditModal({ quote, token, materials, onClose }) {
   );
 }
 
-// ─── Admin Quote Tab ──────────────────────────────────────────────────────────
-function AdminQuoteTab({ token, materials, users, onAddUser }) {
-  const [form, setForm] = useState({
-    user_id: '', width_cm: '', height_cm: '', quantity: 1,
-    print_material_id: '', base_material_id: '', lamination_id: '',
-    discount_override: ''
-  });
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [newCustomerName, setNewCustomerName] = useState('');
-  const [showAddUser, setShowAddUser] = useState(false);
-
-  const byCategory = (name) => materials.filter(m => m.category_name === name && m.active);
-
-  const quoteNumber = result ? Math.floor(Math.random() * 9000 + 1000) : '';
-  const today = new Date().toLocaleDateString('he-IL');
-  const selectedUser = users.find(u => u.id == form.user_id);
-
-  async function handleAddUser(data) {
-    const newUser = await onAddUser(data);
-    setForm(f => ({...f, user_id: newUser.id}));
-    setNewCustomerName('');
-    setShowAddUser(false);
-  }
-
-  async function calculate(e) {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-    try {
-      const res = await apiCall('/api/admin/quotes/calculate', 'POST', {
-        width_cm: parseFloat(form.width_cm),
-        height_cm: parseFloat(form.height_cm),
-        quantity: parseInt(form.quantity),
-        print_material_id: form.print_material_id ? parseInt(form.print_material_id) : null,
-        base_material_id: form.base_material_id ? parseInt(form.base_material_id) : null,
-        lamination_id: form.lamination_id ? parseInt(form.lamination_id) : null,
-        user_id: form.user_id ? parseInt(form.user_id) : null,
-        discount_override: form.discount_override !== '' ? parseFloat(form.discount_override) : null,
-        save_quote: true,
-      }, token);
-      setResult(res);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div>
-      <div className='card'>
-        <h3>📋 הפקת הצעת מחיר</h3>
-        <form onSubmit={calculate} className='form'>
-          <div className='form-row'>
-            <div className='form-group'>
-              <label>לקוח (אופציונלי)</label>
-              <div style={{display:'flex', gap:'8px'}}>
-                <select style={{flex:1}} value={form.user_id} onChange={e => setForm({...form, user_id: e.target.value})}>
-                  <option value=''>-- ללא שיוך לקוח --</option>
-                  {users.map(u => <option key={u.id} value={u.id}>{u.first_name} {u.last_name} ({u.phone})</option>)}
-                </select>
-              </div>
-            </div>
-            <div className='form-group'>
-              <label>הנחה ידנית (%) — ריק = לפי לקוח</label>
-              <input type='number' min='0' max='100' step='0.5' placeholder='0'
-                value={form.discount_override} onChange={e => setForm({...form, discount_override: e.target.value})} />
-            </div>
-          </div>
-          <div className='form-row'>
-            <div className='form-group' style={{flex:1}}>
-              <label>לקוח חדש בדלפק? הכנס שם ולחץ "הוסף לקוח חדש"</label>
-              <div style={{display:'flex', gap:'8px'}}>
-                <input type='text' placeholder='שם הלקוח' style={{flex:1}}
-                  value={newCustomerName} onChange={e => setNewCustomerName(e.target.value)} />
-                <button type='button' className='btn btn-outline' onClick={() => setShowAddUser(true)}>
-                  ➕ הוסף לקוח חדש
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className='form-row'>
-            <div className='form-group'>
-              <label>רוחב (ס"מ)</label>
-              <input type='number' step='0.1' placeholder='100' value={form.width_cm}
-                onChange={e => setForm({...form, width_cm: e.target.value})} required />
-            </div>
-            <div className='form-group'>
-              <label>גובה (ס"מ)</label>
-              <input type='number' step='0.1' placeholder='70' value={form.height_cm}
-                onChange={e => setForm({...form, height_cm: e.target.value})} required />
-            </div>
-            <div className='form-group'>
-              <label>כמות</label>
-              <input type='number' min='1' value={form.quantity}
-                onChange={e => setForm({...form, quantity: e.target.value})} required />
-            </div>
-          </div>
-          <div className='form-row'>
-            <div className='form-group'>
-              <label>🖨️ הדפסה</label>
-              <select value={form.print_material_id} onChange={e => setForm({...form, print_material_id: e.target.value})}>
-                <option value=''>ללא</option>
-                {byCategory('PRINT').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-              </select>
-            </div>
-            <div className='form-group'>
-              <label>🪵 בסיס</label>
-              <select value={form.base_material_id} onChange={e => setForm({...form, base_material_id: e.target.value})}>
-                <option value=''>ללא</option>
-                {byCategory('BASE').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-              </select>
-            </div>
-            <div className='form-group'>
-              <label>✨ למינציה</label>
-              <select value={form.lamination_id} onChange={e => setForm({...form, lamination_id: e.target.value})}>
-                <option value=''>ללא</option>
-                {byCategory('LAMINATION').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-              </select>
-            </div>
-          </div>
-          {error && <div className='alert alert-error'>{error}</div>}
-          <button type='submit' className='btn btn-primary btn-full' disabled={loading}>
-            {loading ? 'מחשב...' : '🧮 חשב והפק הצעה'}
-          </button>
-        </form>
-      </div>
-
-      {result && (
-        <div className='card result-card' id='admin-quote-print'>
-          <div className='print-admin-quote-body'>
-            <div className='quote-header'>
-              <div>
-                <h1 className='quote-title'>הצעת מחיר</h1>
-                <div className='quote-info'>תאריך: {today}</div>
-                {selectedUser && <div className='quote-info'>לכבוד: {selectedUser.first_name} {selectedUser.last_name}</div>}
-              </div>
-              <div className='quote-logo'>
-                <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height:'40px'}}>
-                  <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
-                  <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
-                  <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
-                </svg>
-              </div>
-            </div>
-
-            <table className='quote-table'>
-              <thead><tr><th>פריט</th><th>מידות (מ')</th><th>כמות</th><th>מחיר ליחידה</th><th>סה"כ</th></tr></thead>
-              <tbody>
-                <tr>
-                  <td>הדפסה: {result.print?.name || '-'} <br/> גימור: {result.lamination?.name || '-'} <br/> רקע: {result.base?.name || '-'}</td>
-                  <td dir='ltr'>{form.width_cm / 100} × {form.height_cm / 100}</td>
-                  <td>{result.quantity}</td>
-                  <td>₪{(result.subtotal / result.quantity).toFixed(2)}</td>
-                  <td>₪{result.subtotal.toFixed(2)}</td>
-                </tr>
-              </tbody>
-            </table>
-
-            {result.warnings?.length > 0 && (
-              <div className='quote-warnings'>
-                {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
-              </div>
-            )}
-
-            <div className='quote-summary'>
-              {result.discount_amount > 0 && (
-                <>
-                  <div className='quote-summary-row'><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
-                  <div className='quote-summary-row'><span>הנחה ({result.discount_percent}%):</span><span style={{color:'red'}}>-₪{result.discount_amount.toFixed(2)}</span></div>
-                  <div className='quote-summary-row'><span>סה"כ לאחר הנחה:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
-                </>
-              )}
-              <div className='quote-summary-row'><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
-              <div className='quote-summary-row'>
-                <div className='quote-total-box'>סה"כ לתשלום: {result.total.toFixed(2)} ₪</div>
-              </div>
-            </div>
-          </div>
-
-          {result.layout && (
-            <div className='layout-page print-admin-quote-layout'>
-              <h3 className='layout-title'>גיליון פריסה — {result.print?.name}</h3>
-              <div className='layout-meta'>
-                מידות: {form.width_cm/100}×{form.height_cm/100} מ' · כמות: {result.quantity} · גליל: {result.layout.roll_width_m} מ'<br/>
-                {result.layout.columns} טורים × {result.layout.rows} שורות · אורך נדרש: {result.layout.required_length_m} מ' · בזבוז: {result.layout.waste_percent}%
-              </div>
-              <div className='layout-visual'>
-                {Array.from({length: Math.min(result.layout.columns * result.layout.rows, result.quantity)}).map((_, i) => (
-                  <div key={i} className='layout-item-box' style={{
-                    width: `${(1/result.layout.columns)*100}%`,
-                    height: `${(1/result.layout.rows)*100}%`,
-                    boxSizing:'border-box', float:'right',
-                    borderBottom: Math.floor(i/result.layout.columns) < result.layout.rows-1 ? '1px solid #1a2a44' : 'none'
-                  }}>{i+1}</div>
-                ))}
-                <div style={{clear:'both'}} />
-              </div>
-            </div>
-          )}
-
-          <div style={{textAlign:'center',marginTop:'20px'}}>
-            <button className='btn btn-outline' onClick={() => printSection('print-admin-quote-body')}>🖨️ הדפס הצעה</button>
-            {result.layout && (
-              <button className='btn btn-outline' style={{marginRight:'8px'}} onClick={() => printSection('print-admin-quote-layout')}>
-                🖨️ הדפס גיליון פריסה
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {showAddUser && (
-        <AddUserModal
-          initialName={newCustomerName}
-          onSave={handleAddUser}
-          onClose={() => setShowAddUser(false)}
-        />
-      )}
-    </div>
-  );
-}
-
 // ─── Manual object selector (fallback when auto-detection isn't confirmed) ─────
 function ManualCropSelector({ src, onConfirm, onCancel }) {
   const [rect, setRect] = useState(null);
@@ -1371,7 +1146,7 @@ function ArtworkPicker({ token, onChange }) {
 }
 
 // ─── One line item in a multi-item order/cart ──────────────────────────────────
-function CartItemRow({ index, item, materials, onChange, onRemove, token }) {
+function CartItemRow({ index, item, materials, products, onChange, onRemove, token }) {
   const byCategory = (name) => materials.filter(m => m.category_name === name && m.active);
 
   function update(patch) {
@@ -1384,6 +1159,28 @@ function CartItemRow({ index, item, materials, onChange, onRemove, token }) {
         <h4 style={{margin: 0}}>פריט #{index + 1}</h4>
         <button type='button' className='btn btn-sm btn-danger' onClick={() => onRemove(index)}>🗑️ הסר</button>
       </div>
+      {products?.length > 0 && (
+        <div className='form-group'>
+          <label>🛍️ בחירת מוצר מהיר (אופציונלי)</label>
+          <select value={item.product_id || ''} onChange={e => {
+            const pid = e.target.value;
+            const prod = products.find(p => p.id == pid);
+            if (prod) {
+              update({
+                product_id: pid,
+                print_material_id: prod.print_material_id || '',
+                base_material_id: prod.base_material_id || '',
+                lamination_id: prod.lamination_id || '',
+              });
+            } else {
+              update({product_id: ''});
+            }
+          }}>
+            <option value=''>-- בנייה אישית --</option>
+            {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+      )}
       <div className='form-row'>
         <div className='form-group'>
           <label>רוחב (ס"מ){item.from_artwork ? ' — מהעיצוב' : ''}</label>
@@ -1439,7 +1236,7 @@ const emptyCartItem = () => ({
 });
 
 // ─── Multi-item order/cart: combined nesting across all items per material ────
-function OrderCartTab({ token, materials, users, isAdmin, onAddUser }) {
+function OrderCartTab({ token, materials, products, users, isAdmin, onAddUser, title }) {
   const [items, setItems] = useState([emptyCartItem()]);
   const [userId, setUserId] = useState('');
   const [discountOverride, setDiscountOverride] = useState('');
@@ -1448,8 +1245,6 @@ function OrderCartTab({ token, materials, users, isAdmin, onAddUser }) {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
-  const roleLabel = {print: '🖨️ הדפסה', base: '🪵 בסיס', lamination: '✨ למינציה'};
 
   function addRow() { setItems(prev => [...prev, emptyCartItem()]); }
   function updateRow(idx, newItem) { setItems(prev => prev.map((it, i) => i === idx ? newItem : it)); }
@@ -1499,10 +1294,7 @@ function OrderCartTab({ token, materials, users, isAdmin, onAddUser }) {
   return (
     <div>
       <div className='card'>
-        <h3>🧺 הזמנה מרובת פריטים</h3>
-        <p style={{fontSize: '0.85rem', opacity: 0.75}}>
-          כל הפריטים שמשתמשים באותו חומר נפרסים ומחושבים יחד על אותו גליל, לניצול מקסימלי של החומר.
-        </p>
+        <h3>{title || '📋 הפקת הצעת מחיר'}</h3>
 
         {isAdmin && (
           <div className='form'>
@@ -1534,113 +1326,142 @@ function OrderCartTab({ token, materials, users, isAdmin, onAddUser }) {
         )}
 
         {items.map((item, idx) => (
-          <CartItemRow key={idx} index={idx} item={item} materials={materials}
+          <CartItemRow key={idx} index={idx} item={item} materials={materials} products={products}
             onChange={updateRow} onRemove={removeRow} token={token} />
         ))}
-        <button type='button' className='btn btn-outline' onClick={addRow}>➕ הוסף פריט להזמנה</button>
+        <button type='button' className='btn btn-outline' onClick={addRow}>➕ הוספת פריט</button>
 
         {error && <div className='alert alert-error' style={{marginTop: '10px'}}>{error}</div>}
         <div style={{marginTop: '14px'}}>
           <button className='btn btn-primary btn-full' onClick={calculate} disabled={loading || items.length === 0}>
-            {loading ? 'מחשב...' : '🧮 חשב ופרוס הזמנה'}
+            {loading ? 'מחשב...' : '🧮 חשב הצעה'}
           </button>
         </div>
       </div>
 
-      {result && (
-        <div className='card result-card' style={{marginTop: '16px'}}>
-          <div className='print-order-body'>
-            <div className='quote-header'>
-              <div><h1 className='quote-title'>הצעת מחיר — הזמנה מרובת פריטים</h1></div>
-              <div className='quote-logo'>
-                <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height: '40px'}}>
-                  <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
-                  <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
-                  <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
-                </svg>
-              </div>
-            </div>
-            <table className='quote-table'>
-              <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>הדפסה</th><th>סה"כ</th></tr></thead>
-              <tbody>
-                {result.items.map((it, i) => (
-                  <tr key={i}>
-                    <td>{i + 1}</td>
-                    <td dir='ltr'>{it.width_cm} × {it.height_cm}</td>
-                    <td>{it.quantity}</td>
-                    <td>{it.print?.name}</td>
-                    <td>₪{it.line_total.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {result.warnings?.length > 0 && (
-              <div className='quote-warnings'>
-                {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
-              </div>
-            )}
-            <div className='quote-summary'>
-              {result.discount_amount > 0 && (<>
-                <div className='quote-summary-row'><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
-                <div className='quote-summary-row'><span>הנחה ({result.discount_percent}%):</span><span style={{color: 'red'}}>-₪{result.discount_amount.toFixed(2)}</span></div>
-                <div className='quote-summary-row'><span>סה"כ אחרי הנחה:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
-              </>)}
-              <div className='quote-summary-row'><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
-              <div className='quote-summary-row'><div className='quote-total-box'>סה"כ לתשלום: {result.total.toFixed(2)} ₪</div></div>
-            </div>
-          </div>
-
-          {isAdmin && result.groups?.length > 0 && (
-            <div className='print-order-layout'>
-              {result.groups.map((g, gi) => {
-                const totalLenCm = g.required_length_m * 100;
-                const rollWCm = g.roll_width_m * 100;
-                let runningTop = 0;
-                return (
-                  <div key={gi} className='layout-page' style={{marginTop: '16px'}}>
-                    <h3 className='layout-title'>גיליון פריסה — {g.material_name} ({roleLabel[g.role] || g.role})</h3>
-                    <div className='layout-meta'>
-                      רוחב גליל: {g.roll_width_m} מ' · אורך נדרש: {g.required_length_m} מ' · בזבוז: {g.waste_percent}%
-                    </div>
-                    <div style={{position: 'relative', width: '100%', paddingBottom: `${(totalLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff', marginTop: '8px'}}>
-                      {g.shelves.map((shelf, si) => {
-                        const top = runningTop;
-                        runningTop += shelf.height;
-                        return (
-                          <div key={si} style={{
-                            position: 'absolute', left: 0, width: '100%',
-                            top: `${(top / totalLenCm) * 100}%`, height: `${(shelf.height / totalLenCm) * 100}%`,
-                          }}>
-                            {shelf.items.map((it, ii) => (
-                              <div key={ii} style={{
-                                position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
-                                width: `${(it.w / rollWCm) * 100}%`, height: '100%',
-                                border: '1px solid #6c3fc5', boxSizing: 'border-box',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
-                              }}>#{it.ref + 1}</div>
-                            ))}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          <div style={{textAlign: 'center', marginTop: '20px'}}>
-            <button className='btn btn-outline' onClick={() => printSection('print-order-body')}>🖨️ הדפס הצעת מחיר</button>
-            {isAdmin && result.groups?.length > 0 && (
-              <button className='btn btn-outline' style={{marginRight: '8px'}} onClick={() => printSection('print-order-layout')}>🖨️ הדפס גיליונות פריסה</button>
-            )}
-          </div>
-        </div>
-      )}
+      {result && <OrderResultView result={result} isAdmin={isAdmin} />}
 
       {showAddUser && (
         <AddUserModal initialName={newCustomerName} onSave={handleAddUser} onClose={() => setShowAddUser(false)} />
       )}
+    </div>
+  );
+}
+
+// ─── Shared result view for a computed order (used inline after calculating, and
+// when an admin reopens a previously saved order) ──────────────────────────────
+const ORDER_ROLE_LABEL = {print: '🖨️ הדפסה', base: '🪵 בסיס', lamination: '✨ למינציה'};
+
+function OrderResultView({ result, isAdmin }) {
+  return (
+    <div className='card result-card' style={{marginTop: '16px'}}>
+      <div className='print-order-body'>
+        <div className='quote-header'>
+          <div><h1 className='quote-title'>הצעת מחיר</h1></div>
+          <div className='quote-logo'>
+            <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height: '40px'}}>
+              <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
+              <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
+              <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
+            </svg>
+          </div>
+        </div>
+        <table className='quote-table'>
+          <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>הדפסה</th><th>סה"כ</th></tr></thead>
+          <tbody>
+            {result.items.map((it, i) => (
+              <tr key={i}>
+                <td>{i + 1}</td>
+                <td dir='ltr'>{it.width_cm} × {it.height_cm}</td>
+                <td>{it.quantity}</td>
+                <td>{it.print?.name}</td>
+                <td>₪{it.line_total.toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {result.warnings?.length > 0 && (
+          <div className='quote-warnings'>
+            {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
+          </div>
+        )}
+        <div className='quote-summary'>
+          {result.discount_amount > 0 && (<>
+            <div className='quote-summary-row'><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
+            <div className='quote-summary-row'><span>הנחה ({result.discount_percent}%):</span><span style={{color: 'red'}}>-₪{result.discount_amount.toFixed(2)}</span></div>
+            <div className='quote-summary-row'><span>סה"כ אחרי הנחה:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
+          </>)}
+          <div className='quote-summary-row'><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
+          <div className='quote-summary-row'><div className='quote-total-box'>סה"כ לתשלום: {result.total.toFixed(2)} ₪</div></div>
+        </div>
+      </div>
+
+      {isAdmin && result.groups?.length > 0 && (
+        <div className='print-order-layout'>
+          {result.groups.map((g, gi) => {
+            const totalLenCm = g.required_length_m * 100;
+            const rollWCm = g.roll_width_m * 100;
+            let runningTop = 0;
+            return (
+              <div key={gi} className='layout-page' style={{marginTop: '16px'}}>
+                <h3 className='layout-title'>גיליון פריסה — {g.material_name} ({ORDER_ROLE_LABEL[g.role] || g.role})</h3>
+                <div className='layout-meta'>
+                  רוחב גליל: {g.roll_width_m} מ' · אורך נדרש: {g.required_length_m} מ' · בזבוז: {g.waste_percent}%
+                </div>
+                <div style={{position: 'relative', width: '100%', paddingBottom: `${(totalLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff', marginTop: '8px'}}>
+                  {g.shelves.map((shelf, si) => {
+                    const top = runningTop;
+                    runningTop += shelf.height;
+                    return (
+                      <div key={si} style={{
+                        position: 'absolute', left: 0, width: '100%',
+                        top: `${(top / totalLenCm) * 100}%`, height: `${(shelf.height / totalLenCm) * 100}%`,
+                      }}>
+                        {shelf.items.map((it, ii) => (
+                          <div key={ii} style={{
+                            position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
+                            width: `${(it.w / rollWCm) * 100}%`, height: '100%',
+                            border: '1px solid #6c3fc5', boxSizing: 'border-box',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
+                          }}>#{it.ref + 1}</div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{textAlign: 'center', marginTop: '20px'}}>
+        <button className='btn btn-outline' onClick={() => printSection('print-order-body')}>🖨️ הדפס הצעת מחיר</button>
+        {isAdmin && result.groups?.length > 0 && (
+          <button className='btn btn-outline' style={{marginRight: '8px'}} onClick={() => printSection('print-order-layout')}>🖨️ הדפס גיליונות פריסה</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Admin: view a previously saved order ───────────────────────────────────────
+function OrderViewModal({ order, onClose }) {
+  const breakdown = order.breakdown ? JSON.parse(order.breakdown) : null;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content modal-wide" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>📦 הזמנה #{order.id} — {order.user_name || 'אנונימי'}</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div style={{padding: '16px'}}>
+          {breakdown ? <OrderResultView result={breakdown} isAdmin={true} /> : <div>אין פירוט לשמור</div>}
+          <div style={{textAlign: 'center', marginTop: '12px'}}>
+            <button className="btn btn-primary" onClick={onClose}>סגור</button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1660,10 +1481,14 @@ function AdminPanel({ token }) {
   const [showAddUser, setShowAddUser] = useState(false);
   const [viewingQuote, setViewingQuote] = useState(null);
   const [editingQuote, setEditingQuote] = useState(null);
+  const [orders, setOrders] = useState([]);
+  const [viewingOrder, setViewingOrder] = useState(null);
+  const [products, setProducts] = useState([]);
 
-  useEffect(() => { loadMaterials(); loadCategories(); loadUsers(); }, []);
+  useEffect(() => { loadMaterials(); loadCategories(); loadUsers(); loadProducts(); }, []);
   useEffect(() => {
     if (tab === 'quotes') loadQuotes();
+    if (tab === 'orders') loadOrders();
   }, [tab]);
 
   async function loadMaterials() {
@@ -1678,9 +1503,17 @@ function AdminPanel({ token }) {
     const data = await apiCall("/api/admin/users", "GET", null, token);
     setUsers(data);
   }
+  async function loadProducts() {
+    const data = await apiCall("/api/products");
+    setProducts(data);
+  }
   async function loadQuotes() {
     const data = await apiCall("/api/admin/quotes", "GET", null, token);
     setQuotes(data);
+  }
+  async function loadOrders() {
+    const data = await apiCall("/api/admin/orders", "GET", null, token);
+    setOrders(data);
   }
 
   async function addMaterial(e) {
@@ -1749,14 +1582,13 @@ function AdminPanel({ token }) {
       <div className="panel-header">
         <h2>👑 פאנל ניהול</h2>
         <div className="tab-group">
-          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"],["new-quote","➕ הפק הצעה"],["cart-order","🧺 הזמנה מרובת פריטים"]].map(
+          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"],["orders","📦 הזמנות"],["new-quote","➕ הפק הצעה"]].map(
             ([k, v]) => <button key={k} className={`tab ${tab===k?"active":""}`} onClick={()=>setTab(k)}>{v}</button>
           )}
         </div>
       </div>
 
-      {tab === "new-quote" && <AdminQuoteTab token={token} materials={materials} users={users} onAddUser={addUser} />}
-      {tab === "cart-order" && <OrderCartTab token={token} materials={materials} users={users} isAdmin={true} onAddUser={addUser} />}
+      {tab === "new-quote" && <OrderCartTab token={token} materials={materials} products={products} users={users} isAdmin={true} onAddUser={addUser} />}
 
       {tab === "products" && <ProductsAdminTab token={token} materials={materials} />}
 
@@ -1945,251 +1777,61 @@ function AdminPanel({ token }) {
         <QuoteEditModal quote={editingQuote} token={token} materials={materials} onClose={() => { setEditingQuote(null); loadQuotes(); }} />
       )}
 
+      {tab === "orders" && (
+        <div className="card">
+          <h3>📦 הזמנות ({orders.length})</h3>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr><th>לקוח</th><th>סה"כ</th><th>תאריך</th><th>פעולות</th></tr>
+              </thead>
+              <tbody>
+                {orders.map(o => (
+                  <tr key={o.id}>
+                    <td>{o.user_name || 'אנונימי'}</td>
+                    <td className="price">₪{o.total_price.toFixed(2)}</td>
+                    <td>{new Date(o.created_at).toLocaleDateString('he-IL')}</td>
+                    <td>
+                      <button className='btn btn-sm btn-edit' title='צפה' onClick={() => setViewingOrder(o)}>👁️</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {viewingOrder && (
+        <OrderViewModal order={viewingOrder} onClose={() => setViewingOrder(null)} />
+      )}
+
     </div>
   );
 }
 
 // ─── User Panel ───────────────────────────────────────────────────────────────
-
 function UserPanel({ token, userName }) {
-  const [subTab, setSubTab] = useState('single');
   const [materials, setMaterials] = useState([]);
-  const [categories, setCategories] = useState([]);
   const [products, setProducts] = useState([]);
-  const [form, setForm] = useState({
-    product_id: '',
-    width_cm: '', height_cm: '', quantity: 1,
-    print_material_id: '', base_material_id: '', lamination_id: ''
-  });
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
   useEffect(() => {
     apiCall('/api/materials').then(setMaterials);
-    apiCall('/api/categories').then(setCategories);
     apiCall('/api/products').then(setProducts);
   }, []);
-
-  const byCategory = (name) => materials.filter(m => m.category_name === name);
-
-  async function calculate(e) {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-    setResult(null);
-    try {
-      const data = await apiCall('/api/quotes/calculate', 'POST', {
-        width_cm: parseFloat(form.width_cm),
-        height_cm: parseFloat(form.height_cm),
-        quantity: parseInt(form.quantity),
-        print_material_id: form.print_material_id ? parseInt(form.print_material_id) : null,
-        base_material_id: form.base_material_id ? parseInt(form.base_material_id) : null,
-        lamination_id: form.lamination_id ? parseInt(form.lamination_id) : null,
-      }, token);
-      setResult(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const quoteNumber = Math.floor(Math.random() * 900) + 100;
-  const today = new Date().toLocaleDateString('he-IL');
 
   return (
     <div className='panel'>
       <div className='panel-header'>
         <h2>שלום, {userName}!</h2>
         <p className='subtitle'>בחר חומרים לקבלת הצעת מחיר</p>
-        <div className='tab-group'>
-          <button className={`tab ${subTab === 'single' ? 'active' : ''}`} onClick={() => setSubTab('single')}>📋 הצעה בודדת</button>
-          <button className={`tab ${subTab === 'cart' ? 'active' : ''}`} onClick={() => setSubTab('cart')}>🧺 הזמנה מרובת פריטים</button>
-        </div>
       </div>
 
-      {subTab === 'cart' && (
-        <OrderCartTab token={token} materials={materials} users={[]} isAdmin={false} />
-      )}
-
-      {subTab === 'single' && (
-      <div className='panel-grid'>
-        <div className='card'>
-          <h3>📋 מחשבון הצעת מחיר</h3>
-          <form onSubmit={calculate} className='form'>
-            <div className='form-group'>
-              <label>🛍️ בחירת מוצר מהיר (אופציונלי)</label>
-              <select value={form.product_id}
-                onChange={e => {
-                  const pid = e.target.value;
-                  const prod = products.find(p => p.id == pid);
-                  if (prod) {
-                    setForm({...form, product_id: pid, print_material_id: prod.print_material_id || '', base_material_id: prod.base_material_id || '', lamination_id: prod.lamination_id || ''});
-                  } else {
-                    setForm({...form, product_id: ''});
-                  }
-                }}>
-                <option value=''>-- בנייה אישית --</option>
-                {products.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-            </div>
-            
-            <div className='form-row'>
-              <div className='form-group'>
-                <label>רוחב (ס"מ)</label>
-                <input type='number' step='0.1' placeholder='100' value={form.width_cm}
-                  onChange={e => setForm({...form, width_cm: e.target.value})} required />
-              </div>
-              <div className='form-group'>
-                <label>גובה (ס"מ)</label>
-                <input type='number' step='0.1' placeholder='70' value={form.height_cm}
-                  onChange={e => setForm({...form, height_cm: e.target.value})} required />
-              </div>
-            </div>
-
-            <div className='form-group'>
-              <label>כמות</label>
-              <input type='number' min='1' value={form.quantity}
-                onChange={e => setForm({...form, quantity: e.target.value})} required />
-            </div>
-
-            <div className='form-group'>
-              <label>🖨️ חומר הדפסה</label>
-              <select value={form.print_material_id}
-                onChange={e => setForm({...form, print_material_id: e.target.value})}>
-                <option value=''>ללא הדפסה</option>
-                {byCategory('PRINT').map(m => (
-                  <option key={m.id} value={m.id}>{m.name} - ₪{m.price_per_sqm}/מ"ר</option>
-                ))}
-              </select>
-            </div>
-
-            <div className='form-group'>
-              <label>🧱 חומר רקע / שלט</label>
-              <select value={form.base_material_id}
-                onChange={e => setForm({...form, base_material_id: e.target.value})}>
-                <option value=''>ללא רקע</option>
-                {byCategory('BASE').map(m => (
-                  <option key={m.id} value={m.id}>{m.name} - ₪{m.price_per_sqm}/מ"ר</option>
-                ))}
-              </select>
-            </div>
-
-            <div className='form-group'>
-              <label>✨ למינציה</label>
-              <select value={form.lamination_id}
-                onChange={e => setForm({...form, lamination_id: e.target.value})}>
-                <option value=''>ללא למינציה</option>
-                {byCategory('LAMINATION').map(m => (
-                  <option key={m.id} value={m.id}>{m.name} - ₪{m.price_per_sqm}/מ"ר</option>
-                ))}
-              </select>
-            </div>
-
-            {error && <div className='alert alert-error'>{error}</div>}
-
-            <button type='submit' className='btn btn-primary btn-full' disabled={loading}>
-              {loading ? 'מחשב...' : '🧮 חשב הצעת מחיר'}
-            </button>
-          </form>
-        </div>
-
-        {result && (
-          <div className='card result-card print-user-quote'>
-            <div className='quote-header'>
-              <div>
-                <h1 className='quote-title'>הצעת מחיר</h1>
-                <div className='quote-info'>מספר הצעה: #{quoteNumber}</div>
-                <div className='quote-info'>תאריך: {today}</div>
-              </div>
-              <div className='quote-logo'>
-                <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height:'40px'}}>
-                  <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
-                  <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
-                  <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
-                </svg>
-                <div style={{display: 'flex', flexDirection: 'column'}}>
-                   <span style={{fontSize: '24px', fontWeight: 'bold', color: '#64B5F6', lineHeight: 1}}>שלטי</span>
-                   <span style={{fontSize: '24px', fontWeight: 'bold', color: '#fff', lineHeight: 1}}>הצפון</span>
-                </div>
-              </div>
-            </div>
-
-            <div className='quote-customer'>לכבוד: {userName}</div>
-
-            <table className='quote-table'>
-              <thead>
-                <tr>
-                  <th>פריט</th>
-                  <th>מידות (מ)</th>
-                  <th>כמות</th>
-                  <th>מחיר ליחידה</th>
-                  <th>סה"כ</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>הדפסה: {result.print?.name || '-'} <br/> גימור: {result.lamination?.name || '-'} <br/> רקע: {result.base?.name || '-'}</td>
-                  <td dir='ltr'>{form.width_cm / 100} × {form.height_cm / 100}</td>
-                  <td>{result.quantity}</td>
-                  <td>₪{(result.subtotal / result.quantity).toFixed(2)}</td>
-                  <td>₪{result.subtotal.toFixed(2)}</td>
-                </tr>
-              </tbody>
-            </table>
-
-            {result.warnings && result.warnings.length > 0 && (
-              <div className='quote-warnings'>
-                {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
-              </div>
-            )}
-
-            <div className='quote-summary'>
-              {result.discount_amount > 0 && (
-                <>
-                  <div className='quote-summary-row'>
-                    <span>לפני הנחה:</span>
-                    <span>₪{result.subtotal.toFixed(2)}</span>
-                  </div>
-                  <div className='quote-summary-row'>
-                    <span>הנחה ({result.discount_percent}%):</span>
-                    <span style={{color: 'red'}}>-₪{result.discount_amount.toFixed(2)}</span>
-                  </div>
-                  <div className='quote-summary-row'>
-                    <span>סה"כ לאחר הנחה:</span>
-                    <span>₪{result.total_after_discount.toFixed(2)}</span>
-                  </div>
-                </>
-              )}
-              <div className='quote-summary-row'>
-                <span>מע"מ (18%):</span>
-                <span>₪{result.vat_amount.toFixed(2)}</span>
-              </div>
-              <div className='quote-summary-row' style={{marginTop: '10px'}}>
-                <div className='quote-total-box'>
-                  סה"כ לתשלום: {result.total.toFixed(2)} ₪
-                </div>
-              </div>
-            </div>
-            
-            <p className='result-note' style={{marginTop: '40px', fontSize: '0.8rem', textAlign: 'center'}}>
-              הצעת המחיר בתוקף ל-14 יום ממועד ההפקה<br/>תודה שבחרתם בשלטי הצפון
-            </p>
-
-            <div style={{marginTop: '20px', textAlign: 'center'}}>
-              <button className='btn btn-outline' onClick={() => printSection('print-user-quote')}>
-                🖨️ הדפס הצעת מחיר
-              </button>
-            </div>
-          </div>
-        )}
-        {/* Cutting/layout sheet is admin-only — never shown or printed for customers. */}
-      </div>
-      )}
+      <OrderCartTab token={token} materials={materials} products={products} users={[]}
+        isAdmin={false} title='📋 מחשבון הצעת מחיר' />
     </div>
   );
 }
+
+
 
