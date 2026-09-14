@@ -81,35 +81,6 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                base_material_id INTEGER,
-                print_material_id INTEGER,
-                lamination_id INTEGER,
-                active INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (base_material_id) REFERENCES materials(id),
-                FOREIGN KEY (print_material_id) REFERENCES materials(id),
-                FOREIGN KEY (lamination_id) REFERENCES materials(id)
-            )
-        ''')
-
-        # Migration: add new columns if missing (for existing DBs)
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN invoice_name TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN tax_id TEXT DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN discount_percent INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
 
         # Categories table
         cur.execute("""
@@ -130,17 +101,12 @@ def init_db():
                 min_sqm REAL DEFAULT 0.1,
                 max_width REAL DEFAULT 0,
                 max_length REAL DEFAULT 0,
+                min_price REAL DEFAULT 0,
+                min_linear_m REAL DEFAULT 0,
                 active INTEGER DEFAULT 1,
                 FOREIGN KEY (category_id) REFERENCES categories(id)
             )
         """)
-
-        # Migration for materials
-        try:
-            cur.execute("ALTER TABLE materials ADD COLUMN max_width REAL DEFAULT 0")
-            cur.execute("ALTER TABLE materials ADD COLUMN max_length REAL DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass
 
         # Products (Shelf Products) table
         cur.execute("""
@@ -175,6 +141,22 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+
+        # Migrations (safe ALTER for existing DBs)
+        migrations = [
+            "ALTER TABLE users ADD COLUMN invoice_name TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN tax_id TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN discount_percent INTEGER DEFAULT 0",
+            "ALTER TABLE materials ADD COLUMN max_width REAL DEFAULT 0",
+            "ALTER TABLE materials ADD COLUMN max_length REAL DEFAULT 0",
+            "ALTER TABLE materials ADD COLUMN min_price REAL DEFAULT 0",
+            "ALTER TABLE materials ADD COLUMN min_linear_m REAL DEFAULT 0",
+        ]
+        for m in migrations:
+            try:
+                cur.execute(m)
+            except sqlite3.OperationalError:
+                pass
 
         # Seed admin
         cur.execute("SELECT COUNT(*) FROM admins")
@@ -285,6 +267,8 @@ class MaterialCreate(BaseModel):
     min_sqm: Optional[float] = 0.1
     max_width: Optional[float] = 0.0
     max_length: Optional[float] = 0.0
+    min_price: Optional[float] = 0.0
+    min_linear_m: Optional[float] = 0.0
 
 class MaterialUpdate(BaseModel):
     name: Optional[str] = None
@@ -292,6 +276,8 @@ class MaterialUpdate(BaseModel):
     min_sqm: Optional[float] = None
     max_width: Optional[float] = None
     max_length: Optional[float] = None
+    min_price: Optional[float] = None
+    min_linear_m: Optional[float] = None
     category_id: Optional[int] = None
     active: Optional[int] = None
 
@@ -302,6 +288,26 @@ class QuoteRequest(BaseModel):
     print_material_id: Optional[int] = None
     base_material_id: Optional[int] = None
     lamination_id: Optional[int] = None
+
+class AdminQuoteRequest(BaseModel):
+    width_cm: float
+    height_cm: float
+    quantity: int = 1
+    print_material_id: Optional[int] = None
+    base_material_id: Optional[int] = None
+    lamination_id: Optional[int] = None
+    user_id: Optional[int] = None
+    discount_override: Optional[float] = None  # manual override, None = use user's discount
+    save_quote: Optional[bool] = True
+
+class QuoteUpdate(BaseModel):
+    width_cm: Optional[float] = None
+    height_cm: Optional[float] = None
+    quantity: Optional[int] = None
+    print_material_id: Optional[int] = None
+    base_material_id: Optional[int] = None
+    lamination_id: Optional[int] = None
+    discount_override: Optional[float] = None
 
 class UserUpdate(BaseModel):
     first_name: Optional[str] = None
@@ -326,6 +332,160 @@ class ProductUpdate(BaseModel):
     print_material_id: Optional[int] = None
     lamination_id: Optional[int] = None
     active: Optional[int] = None
+
+
+# ─── Shared Quote Calculation Logic ────────────────────────────────────────────
+def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None):
+    sqm = (data.width_cm / 100) * (data.height_cm / 100)
+    sqm = max(sqm, 0.1)
+    discount_percent = 0
+    warnings = []
+
+    if user_id:
+        user_row = conn.execute("SELECT discount_percent FROM users WHERE id=?", (user_id,)).fetchone()
+        if user_row:
+            discount_percent = user_row["discount_percent"] or 0
+
+    # Manual override takes precedence
+    if discount_override is not None:
+        discount_percent = discount_override
+
+    def get_price(mat_id, category):
+        if not mat_id:
+            return 0, "ללא", None
+        row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
+        if not row:
+            return 0, "לא נמצא", None
+        row_dict = dict(row)
+        price_per_sqm = row_dict["price_per_sqm"]
+
+        # Check dimension constraints
+        max_w = row_dict.get("max_width") or 0
+        max_l = row_dict.get("max_length") or 0
+        if max_w > 0 and max_l > 0:
+            req_min = min(data.width_cm, data.height_cm)
+            req_max = max(data.width_cm, data.height_cm)
+            mat_min = min(max_w, max_l)
+            mat_max = max(max_w, max_l)
+            if req_min > mat_min or req_max > mat_max:
+                warnings.append(f"מידות חריגות עבור '{row_dict['name']}' (מקס' {max_w}×{max_l} ס\"מ)")
+        elif max_w > 0 and data.width_cm > max_w:
+            warnings.append(f"רוחב חריג עבור '{row_dict['name']}' (מקס' {max_w} ס\"מ)")
+        elif max_l > 0 and data.height_cm > max_l:
+            warnings.append(f"אורך חריג עבור '{row_dict['name']}' (מקס' {max_l} ס\"מ)")
+
+        # Apply per-material minimum sqm (effective_sqm = max(sqm, min_sqm))
+        min_sqm_mat = row_dict.get("min_sqm") or 0
+        effective_sqm = max(sqm, min_sqm_mat) if min_sqm_mat > 0 else sqm
+        price = price_per_sqm * effective_sqm * data.quantity
+        if effective_sqm > sqm + 1e-9:
+            extra_sqm = effective_sqm - sqm
+            warnings.append(
+                f"הופעל מ\"ר מינימום עבור '{row_dict['name']}' (מינ' {min_sqm_mat} מ\"ר) — "
+                f"ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
+            )
+
+        # Apply minimum price per material
+        min_price = row_dict.get("min_price") or 0
+        if min_price > 0 and price < min_price * data.quantity:
+            msg = f"הופעל מחיר מינימום עבור '{row_dict['name']}' (מינ' ₪{min_price} ליחידה)"
+            if price_per_sqm > 0:
+                max_sqm_at_min = min_price / price_per_sqm
+                extra_sqm = max_sqm_at_min - effective_sqm
+                if extra_sqm > 0.01:
+                    msg += f" — ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
+            price = min_price * data.quantity
+            warnings.append(msg)
+
+        # Apply minimum linear meter
+        min_linear_m = row_dict.get("min_linear_m") or 0
+        if min_linear_m > 0 and data.width_cm > 0 and data.height_cm > 0:
+            # min_linear_m is in meters; convert width to meters for roll calc
+            roll_w_m = (max_w / 100) if max_w > 0 else (data.width_cm / 100)
+            item_h_m = data.height_cm / 100
+            item_w_m = data.width_cm / 100
+            cols = int(roll_w_m // item_w_m) if roll_w_m > 0 else 0
+            if cols > 0:
+                actual_length_m = item_h_m * ((data.quantity + cols - 1) // cols)
+            else:
+                actual_length_m = item_h_m * data.quantity
+            if actual_length_m < min_linear_m:
+                min_sqm_from_linear = min_linear_m * roll_w_m
+                min_price_from_linear = price_per_sqm * min_sqm_from_linear
+                if price < min_price_from_linear:
+                    extra_length = min_linear_m - actual_length_m
+                    price = min_price_from_linear
+                    warnings.append(
+                        f"הופעל מטר רץ מינימלי עבור '{row_dict['name']}' (מינ' {min_linear_m} מ') — "
+                        f"ניתן לנצל עוד כ-{extra_length:.2f} מ' באותו מחיר"
+                    )
+
+        return price, row_dict["name"], row_dict
+
+    print_price, print_name, print_row = get_price(data.print_material_id, "PRINT")
+    base_price, base_name, base_row = get_price(data.base_material_id, "BASE")
+    lam_price, lam_name, lam_row = get_price(data.lamination_id, "LAMINATION")
+
+    total_before_discount = print_price + base_price + lam_price
+    discount_amount = total_before_discount * (discount_percent / 100.0)
+    total_after_discount = total_before_discount - discount_amount
+    vat_amount = total_after_discount * 0.18  # VAT 18%
+    final_total = total_after_discount + vat_amount
+
+    # Layout logic
+    layout_details = None
+    if print_row and (print_row.get("max_width") or 0) > 0:
+        roll_w = print_row["max_width"]
+        item_w = data.width_cm
+        item_h = data.height_cm
+        qty = data.quantity
+
+        cols_upright = int(roll_w // item_w) if item_w > 0 else 0
+        len_upright = float('inf')
+        if cols_upright > 0:
+            rows_upright = (qty + cols_upright - 1) // cols_upright
+            len_upright = rows_upright * item_h
+
+        cols_rot = int(roll_w // item_h) if item_h > 0 else 0
+        len_rot = float('inf')
+        if cols_rot > 0:
+            rows_rot = (qty + cols_rot - 1) // cols_rot
+            len_rot = rows_rot * item_w
+
+        best_len = min(len_upright, len_rot)
+        if best_len != float('inf'):
+            is_rotated = len_rot < len_upright
+            cols = cols_rot if is_rotated else cols_upright
+            rows_n = (qty + cols - 1) // cols
+            used_area = (item_w / 100) * (item_h / 100) * qty
+            total_roll_area = (roll_w / 100) * (best_len / 100)
+            waste_percent = max(0, ((total_roll_area - used_area) / total_roll_area) * 100) if total_roll_area > 0 else 0
+            layout_details = {
+                "roll_width_m": round(roll_w / 100, 2),
+                "required_length_m": round(best_len / 100, 2),
+                "columns": cols,
+                "rows": rows_n,
+                "is_rotated": is_rotated,
+                "waste_percent": round(waste_percent, 1)
+            }
+
+    return {
+        "sqm": round(sqm, 4),
+        "quantity": data.quantity,
+        "print": {"name": print_name, "price": round(print_price, 2)},
+        "base": {"name": base_name, "price": round(base_price, 2)},
+        "lamination": {"name": lam_name, "price": round(lam_price, 2)},
+        "subtotal": round(total_before_discount, 2),
+        "discount_percent": discount_percent,
+        "discount_amount": round(discount_amount, 2),
+        "total_after_discount": round(total_after_discount, 2),
+        "vat_amount": round(vat_amount, 2),
+        "total": round(final_total, 2),
+        "warnings": warnings,
+        "layout": layout_details,
+        "width_cm": data.width_cm,
+        "height_cm": data.height_cm,
+    }
 
 
 # ─── Auth Endpoints ────────────────────────────────────────────────────────────
@@ -363,7 +523,6 @@ def user_login(data: UserLogin):
 
 @app.post("/api/auth/phone-login")
 def phone_login(data: PhoneLogin):
-    """Login by phone number. Returns token if found, or status='new' if not."""
     phone = data.phone.strip().replace("-", "")
     with get_db() as conn:
         row = conn.execute(
@@ -389,7 +548,6 @@ def phone_login(data: PhoneLogin):
 
 @app.post("/api/auth/phone-register")
 def phone_register(data: PhoneRegister):
-    """Register a new user by phone and auto-login."""
     phone = data.phone.strip().replace("-", "")
     with get_db() as conn:
         try:
@@ -403,18 +561,8 @@ def phone_register(data: PhoneRegister):
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="מספר טלפון כבר קיים במערכת")
     name = f"{data.first_name} {data.last_name}"
-    token = create_token({
-        "sub": phone,
-        "role": "user",
-        "id": user_id,
-        "name": name
-    })
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "role": "user",
-        "name": name
-    }
+    token = create_token({"sub": phone, "role": "user", "id": user_id, "name": name})
+    return {"access_token": token, "token_type": "bearer", "role": "user", "name": name}
 
 
 @app.post("/api/users/register")
@@ -448,7 +596,7 @@ def get_materials():
 @app.get("/api/categories")
 def get_categories():
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM categories").fetchall()
+        rows = conn.execute("SELECT * FROM categories ORDER BY id").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -457,124 +605,35 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
     payload = decode_token(credentials.credentials)
     user_id = payload.get("id") if payload.get("role") == "user" else None
 
-    sqm = (data.width_cm / 100) * (data.height_cm / 100)
-    sqm = max(sqm, 0.1)  # minimum 0.1 sqm
-
-    breakdown = {}
-    total = 0.0
-    discount_percent = 0
-    warnings = []
-
     with get_db() as conn:
-        if user_id:
-            user_row = conn.execute("SELECT discount_percent FROM users WHERE id=?", (user_id,)).fetchone()
-            if user_row:
-                discount_percent = user_row["discount_percent"] or 0
-
-        def get_price(mat_id, category):
-            if not mat_id:
-                return 0, "ללא", None
-            row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
-            if not row:
-                return 0, "לא נמצא", None
-            row_dict = dict(row)
-            price = row_dict["price_per_sqm"] * sqm * data.quantity
-            
-            # Check dimensions constraints
-            max_w = row_dict.get("max_width") or 0
-            max_l = row_dict.get("max_length") or 0
-            if max_w > 0 and max_l > 0:
-                # Allow rotating: check if min(w,h) <= min(max_w, max_l) and max(w,h) <= max(max_w, max_l)
-                req_min = min(data.width_cm, data.height_cm)
-                req_max = max(data.width_cm, data.height_cm)
-                mat_min = min(max_w, max_l)
-                mat_max = max(max_w, max_l)
-                if req_min > mat_min or req_max > mat_max:
-                    warnings.append(f"מידות חריגות עבור החומר '{row_dict['name']}' (מקסימום {max_w}x{max_l} ס\"מ). תיתכן תוספת תשלום או חלוקה.")
-            elif max_w > 0 and data.width_cm > max_w:
-                warnings.append(f"רוחב חריג עבור '{row_dict['name']}' (מקסימום {max_w} ס\"מ).")
-            elif max_l > 0 and data.height_cm > max_l:
-                warnings.append(f"אורך חריג עבור '{row_dict['name']}' (מקסימום {max_l} ס\"מ).")
-
-            return price, row_dict["name"], row_dict
-
-        print_price, print_name, print_row = get_price(data.print_material_id, "PRINT")
-        base_price, base_name, base_row = get_price(data.base_material_id, "BASE")
-        lam_price, lam_name, lam_row = get_price(data.lamination_id, "LAMINATION")
-
-        total_before_discount = print_price + base_price + lam_price
-        discount_amount = total_before_discount * (discount_percent / 100.0)
-        total_after_discount = total_before_discount - discount_amount
-        vat_amount = total_after_discount * 0.17
-        final_total = total_after_discount + vat_amount
-
-        # Layout logic for Print material (assumed roll material if max_width > 0 and max_length == 0 or very large)
-        layout_details = None
-        if print_row and print_row.get("max_width", 0) > 0:
-            roll_w = print_row["max_width"]
-            item_w = data.width_cm
-            item_h = data.height_cm
-            qty = data.quantity
-
-            # Try upright
-            cols_upright = int(roll_w // item_w) if item_w > 0 else 0
-            len_upright = float('inf')
-            if cols_upright > 0:
-                rows_upright = (qty + cols_upright - 1) // cols_upright
-                len_upright = rows_upright * item_h
-
-            # Try rotated
-            cols_rot = int(roll_w // item_h) if item_h > 0 else 0
-            len_rot = float('inf')
-            if cols_rot > 0:
-                rows_rot = (qty + cols_rot - 1) // cols_rot
-                len_rot = rows_rot * item_w
-
-            best_len = min(len_upright, len_rot)
-            if best_len != float('inf'):
-                is_rotated = len_rot < len_upright
-                cols = cols_rot if is_rotated else cols_upright
-                rows = (qty + cols - 1) // cols
-                # Waste calc
-                used_area = (item_w / 100) * (item_h / 100) * qty
-                total_roll_area = (roll_w / 100) * (best_len / 100)
-                waste_percent = max(0, ((total_roll_area - used_area) / total_roll_area) * 100) if total_roll_area > 0 else 0
-
-                layout_details = {
-                    "roll_width_m": round(roll_w / 100, 2),
-                    "required_length_m": round(best_len / 100, 2),
-                    "columns": cols,
-                    "rows": rows,
-                    "is_rotated": is_rotated,
-                    "waste_percent": round(waste_percent, 1)
-                }
-
-        breakdown = {
-            "sqm": round(sqm, 4),
-            "quantity": data.quantity,
-            "print": {"name": print_name, "price": round(print_price, 2)},
-            "base": {"name": base_name, "price": round(base_price, 2)},
-            "lamination": {"name": lam_name, "price": round(lam_price, 2)},
-            "subtotal": round(total_before_discount, 2),
-            "discount_percent": discount_percent,
-            "discount_amount": round(discount_amount, 2),
-            "total_after_discount": round(total_after_discount, 2),
-            "vat_amount": round(vat_amount, 2),
-            "total": round(final_total, 2),
-            "warnings": warnings,
-            "layout": layout_details
-        }
-
+        breakdown = compute_quote(conn, data, user_id=user_id)
         import json
         conn.execute("""
             INSERT INTO quotes (user_id, width_cm, height_cm, sqm, print_material_id,
                 base_material_id, lamination_id, quantity, total_price, breakdown)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, data.width_cm, data.height_cm, sqm,
+        """, (user_id, data.width_cm, data.height_cm, breakdown["sqm"],
               data.print_material_id, data.base_material_id, data.lamination_id,
-              data.quantity, final_total, json.dumps(breakdown, ensure_ascii=False)))
+              data.quantity, breakdown["total"], json.dumps(breakdown, ensure_ascii=False)))
 
     return breakdown
+
+
+@app.get("/api/products")
+def get_products():
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT p.*,
+                   bm.name as base_material_name,
+                   pm.name as print_material_name,
+                   lm.name as lamination_name
+            FROM products p
+            LEFT JOIN materials bm ON p.base_material_id = bm.id
+            LEFT JOIN materials pm ON p.print_material_id = pm.id
+            LEFT JOIN materials lm ON p.lamination_id = lm.id
+            WHERE p.active = 1
+        """).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ─── Admin Endpoints ───────────────────────────────────────────────────────────
@@ -593,8 +652,10 @@ def admin_get_materials(admin=Depends(get_current_admin)):
 def admin_create_material(data: MaterialCreate, admin=Depends(get_current_admin)):
     with get_db() as conn:
         cur = conn.execute(
-            "INSERT INTO materials (category_id, name, price_per_sqm, min_sqm, max_width, max_length) VALUES (?, ?, ?, ?, ?, ?)",
-            (data.category_id, data.name, data.price_per_sqm, data.min_sqm, data.max_width, data.max_length)
+            """INSERT INTO materials (category_id, name, price_per_sqm, min_sqm, max_width, max_length, min_price, min_linear_m)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (data.category_id, data.name, data.price_per_sqm, data.min_sqm or 0.1,
+             data.max_width or 0, data.max_length or 0, data.min_price or 0, data.min_linear_m or 0)
         )
     return {"id": cur.lastrowid, "message": "חומר נוסף בהצלחה"}
 
@@ -606,11 +667,8 @@ def admin_update_material(material_id: int, data: MaterialUpdate, admin=Depends(
         raise HTTPException(status_code=400, detail="אין שינויים לעדכן")
     set_clause = ", ".join(f"{k}=?" for k in updates)
     with get_db() as conn:
-        conn.execute(
-            f"UPDATE materials SET {set_clause} WHERE id=?",
-            (*updates.values(), material_id)
-        )
-    return {"message": "עודכן בהצלחה"}
+        conn.execute(f"UPDATE materials SET {set_clause} WHERE id=?", (*updates.values(), material_id))
+    return {"message": "חומר עודכן בהצלחה"}
 
 
 @app.delete("/api/admin/materials/{material_id}")
@@ -636,28 +694,97 @@ def admin_update_user(user_id: int, data: UserUpdate, admin=Depends(get_current_
         raise HTTPException(status_code=400, detail="אין שינויים לעדכן")
     set_clause = ", ".join(f"{k}=?" for k in updates)
     with get_db() as conn:
-        conn.execute(
-            f"UPDATE users SET {set_clause} WHERE id=?",
-            (*updates.values(), user_id)
-        )
+        conn.execute(f"UPDATE users SET {set_clause} WHERE id=?", (*updates.values(), user_id))
     return {"message": "הלקוח עודכן בהצלחה"}
 
 
-@app.get("/api/products")
-def get_products():
+@app.get("/api/admin/quotes")
+def admin_get_quotes(admin=Depends(get_current_admin)):
     with get_db() as conn:
         rows = conn.execute("""
-            SELECT p.*,
-                   bm.name as base_material_name,
-                   pm.name as print_material_name,
-                   lm.name as lamination_name
-            FROM products p
-            LEFT JOIN materials bm ON p.base_material_id = bm.id
-            LEFT JOIN materials pm ON p.print_material_id = pm.id
-            LEFT JOIN materials lm ON p.lamination_id = lm.id
-            WHERE p.active = 1
+            SELECT q.*, u.first_name || ' ' || u.last_name as user_name, u.email, u.phone
+            FROM quotes q LEFT JOIN users u ON q.user_id = u.id
+            ORDER BY q.created_at DESC LIMIT 200
         """).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/admin/quotes/{quote_id}")
+def admin_get_quote(quote_id: int, admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT q.*, u.first_name || ' ' || u.last_name as user_name,
+                   u.email, u.phone, u.discount_percent as user_discount
+            FROM quotes q LEFT JOIN users u ON q.user_id = u.id
+            WHERE q.id=?
+        """, (quote_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="הצעה לא נמצאה")
+    return dict(row)
+
+
+@app.put("/api/admin/quotes/{quote_id}")
+def admin_update_quote(quote_id: int, data: QuoteUpdate, admin=Depends(get_current_admin)):
+    # Editing a quote keeps the original as history and saves the edit as a new quote,
+    # linked back to the one it was edited from.
+    import json
+    with get_db() as conn:
+        # Get existing quote
+        existing = conn.execute("SELECT * FROM quotes WHERE id=?", (quote_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="הצעה לא נמצאה")
+        existing = dict(existing)
+
+        # Merge with updates
+        merged = QuoteRequest(
+            width_cm=data.width_cm if data.width_cm is not None else existing["width_cm"],
+            height_cm=data.height_cm if data.height_cm is not None else existing["height_cm"],
+            quantity=data.quantity if data.quantity is not None else existing["quantity"],
+            print_material_id=data.print_material_id if data.print_material_id is not None else existing["print_material_id"],
+            base_material_id=data.base_material_id if data.base_material_id is not None else existing["base_material_id"],
+            lamination_id=data.lamination_id if data.lamination_id is not None else existing["lamination_id"],
+        )
+
+        discount_override = data.discount_override
+        breakdown = compute_quote(conn, merged, user_id=existing["user_id"], discount_override=discount_override)
+        breakdown["replaces_quote_id"] = quote_id
+
+        cur = conn.execute("""
+            INSERT INTO quotes (user_id, width_cm, height_cm, sqm, print_material_id,
+                base_material_id, lamination_id, quantity, total_price, breakdown)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (existing["user_id"], merged.width_cm, merged.height_cm, breakdown["sqm"],
+              merged.print_material_id, merged.base_material_id, merged.lamination_id,
+              merged.quantity, breakdown["total"],
+              json.dumps(breakdown, ensure_ascii=False)))
+        breakdown["id"] = cur.lastrowid
+
+    return breakdown
+
+
+@app.post("/api/admin/quotes/calculate")
+def admin_calculate_quote(data: AdminQuoteRequest, admin=Depends(get_current_admin)):
+    import json
+    req = QuoteRequest(
+        width_cm=data.width_cm,
+        height_cm=data.height_cm,
+        quantity=data.quantity,
+        print_material_id=data.print_material_id,
+        base_material_id=data.base_material_id,
+        lamination_id=data.lamination_id,
+    )
+    with get_db() as conn:
+        breakdown = compute_quote(conn, req, user_id=data.user_id, discount_override=data.discount_override)
+        if data.save_quote:
+            conn.execute("""
+                INSERT INTO quotes (user_id, width_cm, height_cm, sqm, print_material_id,
+                    base_material_id, lamination_id, quantity, total_price, breakdown)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (data.user_id, data.width_cm, data.height_cm, breakdown["sqm"],
+                  data.print_material_id, data.base_material_id, data.lamination_id,
+                  data.quantity, breakdown["total"], json.dumps(breakdown, ensure_ascii=False)))
+    return breakdown
+
 
 @app.post("/api/admin/products")
 def admin_create_product(data: ProductCreate, admin=Depends(get_current_admin)):
@@ -668,6 +795,7 @@ def admin_create_product(data: ProductCreate, admin=Depends(get_current_admin)):
         )
     return {"id": cur.lastrowid, "message": "מוצר נוסף בהצלחה"}
 
+
 @app.put("/api/admin/products/{product_id}")
 def admin_update_product(product_id: int, data: ProductUpdate, admin=Depends(get_current_admin)):
     updates = {k: v for k, v in data.dict().items() if v is not None}
@@ -675,39 +803,25 @@ def admin_update_product(product_id: int, data: ProductUpdate, admin=Depends(get
         raise HTTPException(status_code=400, detail="אין שינויים לעדכן")
     set_clause = ", ".join(f"{k}=?" for k in updates)
     with get_db() as conn:
-        conn.execute(
-            f"UPDATE products SET {set_clause} WHERE id=?",
-            (*updates.values(), product_id)
-        )
+        conn.execute(f"UPDATE products SET {set_clause} WHERE id=?", (*updates.values(), product_id))
     return {"message": "המוצר עודכן בהצלחה"}
+
 
 @app.delete("/api/admin/products/{product_id}")
 def admin_delete_product(product_id: int, admin=Depends(get_current_admin)):
     with get_db() as conn:
-        conn.execute("UPDATE products SET active=0 WHERE id=?", (product_id,))
-    return {"message": "המוצר הוסר"}
-
-
-@app.get("/api/admin/quotes")
-def admin_get_quotes(admin=Depends(get_current_admin)):
-    with get_db() as conn:
-        rows = conn.execute("""
-            SELECT q.*, u.first_name || ' ' || u.last_name as user_name, u.email
-            FROM quotes q LEFT JOIN users u ON q.user_id = u.id
-            ORDER BY q.created_at DESC LIMIT 100
-        """).fetchall()
-    return [dict(r) for r in rows]
+        conn.execute("DELETE FROM products WHERE id=?", (product_id,))
+    return {"message": "המוצר נמחק"}
 
 
 from fastapi.staticfiles import StaticFiles
-import os
 
 if os.path.isdir("dist"):
     app.mount("/", StaticFiles(directory="dist", html=True), name="static")
 else:
     @app.get("/")
     def root():
-        return {"message": "שלטי הצפון API - v4.0", "docs": "/docs", "warning": "Frontend dist folder not found. Run 'vite build' to serve the React app."}
+        return {"message": "שלטי הצפון API - v4.0", "docs": "/docs"}
 
 
 # ─── Startup ───────────────────────────────────────────────────────────────────

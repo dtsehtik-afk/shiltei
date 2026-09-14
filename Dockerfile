@@ -4,6 +4,7 @@ FROM node:20-alpine AS frontend-builder
 WORKDIR /app
 COPY package.json .
 RUN npm install
+COPY index.html .
 COPY public/ ./public/
 COPY src/ ./src/
 COPY vite.config.js .
@@ -22,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY pricing_v4_auth.py .
 
 # Frontend build output
-COPY --from=frontend-builder /app/dist ./static
+COPY --from=frontend-builder /app/dist ./dist
 
 # Serve static files from FastAPI
 RUN pip install aiofiles

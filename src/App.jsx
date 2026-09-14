@@ -335,8 +335,11 @@ function EditMaterialModal({ material, categories, onSave, onClose }) {
     name: material.name,
     price_per_sqm: material.price_per_sqm,
     min_sqm: material.min_sqm || 0.1,
-    max_width: material.max_width || 0,
-    max_length: material.max_length || 0,
+    max_width: material.max_width || '',
+    max_length: material.max_length || '',
+    min_price: material.min_price || '',
+    min_linear_m: material.min_linear_m || '',
+    min_unit: material.min_linear_m > 0 ? 'linear' : 'sqm',
     category_id: material.category_id,
   });
   const [loading, setLoading] = useState(false);
@@ -350,9 +353,11 @@ function EditMaterialModal({ material, categories, onSave, onClose }) {
       await onSave(material.id, {
         name: form.name,
         price_per_sqm: parseFloat(form.price_per_sqm),
-        min_sqm: parseFloat(form.min_sqm),
-        max_width: parseFloat(form.max_width),
-        max_length: parseFloat(form.max_length),
+        min_sqm: form.min_unit === 'sqm' ? parseFloat(form.min_sqm) || 0.1 : 0.1,
+        max_width: form.max_width !== '' ? parseFloat(form.max_width) : 0,
+        max_length: form.max_length !== '' ? parseFloat(form.max_length) : 0,
+        min_price: form.min_price !== '' ? parseFloat(form.min_price) : 0,
+        min_linear_m: form.min_unit === 'linear' ? parseFloat(form.min_linear_m) || 0 : 0,
         category_id: parseInt(form.category_id),
       });
     } catch (err) {
@@ -382,14 +387,43 @@ function EditMaterialModal({ material, categories, onSave, onClose }) {
           </div>
           <div className="form-row">
             <div className="form-group">
-              <label>מחיר ל-SQM (₪)</label>
+              <label>מחיר למ"ר (₪)</label>
               <input type="number" step="0.01" value={form.price_per_sqm}
                 onChange={e => setForm({...form, price_per_sqm: e.target.value})} required />
             </div>
             <div className="form-group">
-              <label>מינימום מ"ר</label>
-              <input type="number" step="0.01" value={form.min_sqm}
-                onChange={e => setForm({...form, min_sqm: e.target.value})} required />
+              <label>מחיר מינימום לעבודה (₪)</label>
+              <input type="number" step="0.01" placeholder="ללא מינימום" value={form.min_price}
+                onChange={e => setForm({...form, min_price: e.target.value})} />
+            </div>
+          </div>
+          <div className="form-group">
+            <label>מידה מינימלית לחיוב</label>
+            <div className="form-row" style={{gap: '8px', alignItems: 'center'}}>
+              <select value={form.min_unit} onChange={e => setForm({...form, min_unit: e.target.value})}
+                style={{flex: '0 0 140px'}}>
+                <option value="sqm">מ"ר מינימום</option>
+                <option value="linear">מטר רץ מינימום</option>
+              </select>
+              {form.min_unit === 'sqm' ? (
+                <input type="number" step="0.01" placeholder="0.1" value={form.min_sqm}
+                  onChange={e => setForm({...form, min_sqm: e.target.value})} style={{flex: 1}} />
+              ) : (
+                <input type="number" step="0.1" placeholder='למשל: 1.5' value={form.min_linear_m}
+                  onChange={e => setForm({...form, min_linear_m: e.target.value})} style={{flex: 1}} />
+              )}
+            </div>
+          </div>
+          <div className="form-row">
+            <div className="form-group">
+              <label>רוחב מקסימלי (ס"מ) — ריק = ∞</label>
+              <input type="number" step="0.1" placeholder="∞ ללא הגבלה" value={form.max_width}
+                onChange={e => setForm({...form, max_width: e.target.value})} />
+            </div>
+            <div className="form-group">
+              <label>אורך מקסימלי (ס"מ) — ריק = ∞</label>
+              <input type="number" step="0.1" placeholder="∞ ללא הגבלה" value={form.max_length}
+                onChange={e => setForm({...form, max_length: e.target.value})} />
             </div>
           </div>
           {error && <div className="alert alert-error">{error}</div>}
@@ -561,22 +595,421 @@ function ProductsAdminTab({ token, materials }) {
 
 
 
+// ─── Quote View Modal ─────────────────────────────────────────────────────────
+function QuoteViewModal({ quote, token, materials, onClose }) {
+  const bd = quote.breakdown ? JSON.parse(quote.breakdown) : null;
+  const today = new Date(quote.created_at).toLocaleDateString('he-IL');
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content modal-wide" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>📋 הצעת מחיר #{quote.id}</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div style={{padding: '16px'}}>
+          <div className="quote-header">
+            <div>
+              <div className="quote-info">תאריך: {today}</div>
+              <div className="quote-info">לקוח: {quote.user_name || 'אנונימי'}</div>
+              {quote.phone && <div className="quote-info">טלפון: {quote.phone}</div>}
+            </div>
+            <div className="quote-logo">
+              <svg viewBox="0 0 100 50" fill="none" xmlns="http://www.w3.org/2000/svg" style={{height:'40px'}}>
+                <path d="M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z" fill="#29B6F6"/>
+                <path d="M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z" fill="#AB47BC"/>
+                <path d="M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z" fill="#FFA726"/>
+              </svg>
+            </div>
+          </div>
+
+          {bd ? (
+            <>
+              <table className="quote-table">
+                <thead><tr><th>פריט</th><th>מידות (מ')</th><th>כמות</th><th>מחיר ליחידה</th><th>סה"כ</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td>הדפסה: {bd.print?.name || '-'}<br/>גימור: {bd.lamination?.name || '-'}<br/>רקע: {bd.base?.name || '-'}</td>
+                    <td dir="ltr">{(quote.width_cm/100).toFixed(2)} × {(quote.height_cm/100).toFixed(2)}</td>
+                    <td>{bd.quantity}</td>
+                    <td>₪{(bd.subtotal / bd.quantity).toFixed(2)}</td>
+                    <td>₪{bd.subtotal.toFixed(2)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              {bd.warnings?.length > 0 && (
+                <div className="quote-warnings">
+                  {bd.warnings.map((w, i) => <div key={i} className="quote-warning-item">⚠️ {w}</div>)}
+                </div>
+              )}
+              <div className="quote-summary">
+                {bd.discount_amount > 0 && (<>
+                  <div className="quote-summary-row"><span>לפני הנחה:</span><span>₪{bd.subtotal.toFixed(2)}</span></div>
+                  <div className="quote-summary-row"><span>הנחה ({bd.discount_percent}%):</span><span style={{color:'red'}}>-₪{bd.discount_amount.toFixed(2)}</span></div>
+                  <div className="quote-summary-row"><span>סה"כ אחרי הנחה:</span><span>₪{bd.total_after_discount.toFixed(2)}</span></div>
+                </>)}
+                <div className="quote-summary-row"><span>מע"מ (18%):</span><span>₪{bd.vat_amount.toFixed(2)}</span></div>
+                <div className="quote-summary-row">
+                  <div className="quote-total-box">סה"כ לתשלום: {bd.total.toFixed(2)} ₪</div>
+                </div>
+              </div>
+              {bd.layout && (
+                <div className="layout-page" style={{marginTop:'16px'}}>
+                  <h3 className="layout-title">גיליון פריסה — {bd.print?.name}</h3>
+                  <div className="layout-meta">
+                    מידות: {(quote.width_cm/100).toFixed(2)}×{(quote.height_cm/100).toFixed(2)} מ' · כמות: {bd.quantity} · גליל: {bd.layout.roll_width_m} מ'<br/>
+                    {bd.layout.columns} טורים × {bd.layout.rows} שורות · אורך נדרש: {bd.layout.required_length_m} מ' · בזבוז: {bd.layout.waste_percent}%
+                  </div>
+                  <div className="layout-visual">
+                    {Array.from({length: Math.min(bd.layout.columns * bd.layout.rows, bd.quantity)}).map((_, i) => (
+                      <div key={i} className="layout-item-box" style={{
+                        width: `${(1/bd.layout.columns)*100}%`,
+                        height: `${(1/bd.layout.rows)*100}%`,
+                        boxSizing:'border-box', float:'right',
+                        borderBottom: Math.floor(i/bd.layout.columns) < bd.layout.rows-1 ? '1px solid #1a2a44' : 'none'
+                      }}>{i+1}</div>
+                    ))}
+                    <div style={{clear:'both'}} />
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div>אין פירוט לשמור</div>
+          )}
+          <div style={{textAlign:'center', marginTop:'16px'}}>
+            <button className="btn btn-outline" onClick={() => window.print()}>🖨️ הדפס</button>
+            <button className="btn btn-primary" style={{marginRight:'8px'}} onClick={onClose}>סגור</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Quote Edit Modal ─────────────────────────────────────────────────────────
+function QuoteEditModal({ quote, token, materials, onClose }) {
+  const [form, setForm] = useState({
+    width_cm: quote.width_cm,
+    height_cm: quote.height_cm,
+    quantity: quote.quantity,
+    print_material_id: quote.print_material_id || '',
+    base_material_id: quote.base_material_id || '',
+    lamination_id: quote.lamination_id || '',
+    discount_override: '',
+  });
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const byCategory = (name) => materials.filter(m => m.category_name === name && m.active);
+
+  async function handleSave(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const res = await apiCall(`/api/admin/quotes/${quote.id}`, 'PUT', {
+        width_cm: parseFloat(form.width_cm),
+        height_cm: parseFloat(form.height_cm),
+        quantity: parseInt(form.quantity),
+        print_material_id: form.print_material_id ? parseInt(form.print_material_id) : null,
+        base_material_id: form.base_material_id ? parseInt(form.base_material_id) : null,
+        lamination_id: form.lamination_id ? parseInt(form.lamination_id) : null,
+        discount_override: form.discount_override !== '' ? parseFloat(form.discount_override) : null,
+      }, token);
+      setResult(res);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content modal-wide" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>✏️ עריכת הצעה #{quote.id} — {quote.user_name || 'אנונימי'}</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div style={{padding: '16px'}}>
+          <form onSubmit={handleSave} className="form">
+            <div className="form-row">
+              <div className="form-group">
+                <label>רוחב (ס"מ)</label>
+                <input type="number" step="0.1" value={form.width_cm} onChange={e => setForm({...form, width_cm: e.target.value})} required />
+              </div>
+              <div className="form-group">
+                <label>גובה (ס"מ)</label>
+                <input type="number" step="0.1" value={form.height_cm} onChange={e => setForm({...form, height_cm: e.target.value})} required />
+              </div>
+              <div className="form-group">
+                <label>כמות</label>
+                <input type="number" min="1" value={form.quantity} onChange={e => setForm({...form, quantity: e.target.value})} required />
+              </div>
+              <div className="form-group">
+                <label>הנחה ידנית (%) — ריק = לפי לקוח</label>
+                <input type="number" min="0" max="100" step="0.5" placeholder="ללא override" value={form.discount_override}
+                  onChange={e => setForm({...form, discount_override: e.target.value})} />
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label>🖨️ הדפסה</label>
+                <select value={form.print_material_id} onChange={e => setForm({...form, print_material_id: e.target.value})}>
+                  <option value="">ללא</option>
+                  {byCategory('PRINT').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label>🪵 בסיס</label>
+                <select value={form.base_material_id} onChange={e => setForm({...form, base_material_id: e.target.value})}>
+                  <option value="">ללא</option>
+                  {byCategory('BASE').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label>✨ למינציה</label>
+                <select value={form.lamination_id} onChange={e => setForm({...form, lamination_id: e.target.value})}>
+                  <option value="">ללא</option>
+                  {byCategory('LAMINATION').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+              </div>
+            </div>
+            {error && <div className="alert alert-error">{error}</div>}
+            <div className="modal-actions">
+              <button type="submit" className="btn btn-primary" disabled={loading}>
+                {loading ? 'מחשב...' : '💾 עדכן הצעה'}
+              </button>
+              <button type="button" className="btn btn-outline" onClick={onClose}>סגור</button>
+            </div>
+          </form>
+          {result && (
+            <div className="quote-summary" style={{marginTop:'16px', padding:'12px', background:'var(--bg-card)', borderRadius:'8px'}}>
+              <h4>✅ הצעה עודכנה</h4>
+              {result.discount_amount > 0 && (
+                <><div className="quote-summary-row"><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
+                <div className="quote-summary-row"><span>הנחה ({result.discount_percent}%):</span><span>-₪{result.discount_amount.toFixed(2)}</span></div></>
+              )}
+              <div className="quote-summary-row"><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
+              <div className="quote-summary-row">
+                <div className="quote-total-box">סה"כ לתשלום: {result.total.toFixed(2)} ₪</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Admin Quote Tab ──────────────────────────────────────────────────────────
+function AdminQuoteTab({ token, materials, users }) {
+  const [form, setForm] = useState({
+    user_id: '', width_cm: '', height_cm: '', quantity: 1,
+    print_material_id: '', base_material_id: '', lamination_id: '',
+    discount_override: ''
+  });
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const byCategory = (name) => materials.filter(m => m.category_name === name && m.active);
+
+  const quoteNumber = result ? Math.floor(Math.random() * 9000 + 1000) : '';
+  const today = new Date().toLocaleDateString('he-IL');
+  const selectedUser = users.find(u => u.id == form.user_id);
+
+  async function calculate(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const res = await apiCall('/api/admin/quotes/calculate', 'POST', {
+        width_cm: parseFloat(form.width_cm),
+        height_cm: parseFloat(form.height_cm),
+        quantity: parseInt(form.quantity),
+        print_material_id: form.print_material_id ? parseInt(form.print_material_id) : null,
+        base_material_id: form.base_material_id ? parseInt(form.base_material_id) : null,
+        lamination_id: form.lamination_id ? parseInt(form.lamination_id) : null,
+        user_id: form.user_id ? parseInt(form.user_id) : null,
+        discount_override: form.discount_override !== '' ? parseFloat(form.discount_override) : null,
+        save_quote: true,
+      }, token);
+      setResult(res);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className='card'>
+        <h3>📋 הפקת הצעת מחיר</h3>
+        <form onSubmit={calculate} className='form'>
+          <div className='form-row'>
+            <div className='form-group'>
+              <label>לקוח (אופציונלי)</label>
+              <select value={form.user_id} onChange={e => setForm({...form, user_id: e.target.value})}>
+                <option value=''>-- ללא שיוך לקוח --</option>
+                {users.map(u => <option key={u.id} value={u.id}>{u.first_name} {u.last_name} ({u.phone})</option>)}
+              </select>
+            </div>
+            <div className='form-group'>
+              <label>הנחה ידנית (%) — ריק = לפי לקוח</label>
+              <input type='number' min='0' max='100' step='0.5' placeholder='0'
+                value={form.discount_override} onChange={e => setForm({...form, discount_override: e.target.value})} />
+            </div>
+          </div>
+          <div className='form-row'>
+            <div className='form-group'>
+              <label>רוחב (ס"מ)</label>
+              <input type='number' step='0.1' placeholder='100' value={form.width_cm}
+                onChange={e => setForm({...form, width_cm: e.target.value})} required />
+            </div>
+            <div className='form-group'>
+              <label>גובה (ס"מ)</label>
+              <input type='number' step='0.1' placeholder='70' value={form.height_cm}
+                onChange={e => setForm({...form, height_cm: e.target.value})} required />
+            </div>
+            <div className='form-group'>
+              <label>כמות</label>
+              <input type='number' min='1' value={form.quantity}
+                onChange={e => setForm({...form, quantity: e.target.value})} required />
+            </div>
+          </div>
+          <div className='form-row'>
+            <div className='form-group'>
+              <label>🖨️ הדפסה</label>
+              <select value={form.print_material_id} onChange={e => setForm({...form, print_material_id: e.target.value})}>
+                <option value=''>ללא</option>
+                {byCategory('PRINT').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+            <div className='form-group'>
+              <label>🪵 בסיס</label>
+              <select value={form.base_material_id} onChange={e => setForm({...form, base_material_id: e.target.value})}>
+                <option value=''>ללא</option>
+                {byCategory('BASE').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+            <div className='form-group'>
+              <label>✨ למינציה</label>
+              <select value={form.lamination_id} onChange={e => setForm({...form, lamination_id: e.target.value})}>
+                <option value=''>ללא</option>
+                {byCategory('LAMINATION').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </div>
+          </div>
+          {error && <div className='alert alert-error'>{error}</div>}
+          <button type='submit' className='btn btn-primary btn-full' disabled={loading}>
+            {loading ? 'מחשב...' : '🧮 חשב והפק הצעה'}
+          </button>
+        </form>
+      </div>
+
+      {result && (
+        <div className='card result-card' id='admin-quote-print'>
+          <div className='quote-header'>
+            <div>
+              <h1 className='quote-title'>הצעת מחיר</h1>
+              <div className='quote-info'>תאריך: {today}</div>
+              {selectedUser && <div className='quote-info'>לכבוד: {selectedUser.first_name} {selectedUser.last_name}</div>}
+            </div>
+            <div className='quote-logo'>
+              <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height:'40px'}}>
+                <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
+                <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
+                <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
+              </svg>
+            </div>
+          </div>
+
+          <table className='quote-table'>
+            <thead><tr><th>פריט</th><th>מידות (מ')</th><th>כמות</th><th>מחיר ליחידה</th><th>סה"כ</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>הדפסה: {result.print?.name || '-'} <br/> גימור: {result.lamination?.name || '-'} <br/> רקע: {result.base?.name || '-'}</td>
+                <td dir='ltr'>{form.width_cm / 100} × {form.height_cm / 100}</td>
+                <td>{result.quantity}</td>
+                <td>₪{(result.subtotal / result.quantity).toFixed(2)}</td>
+                <td>₪{result.subtotal.toFixed(2)}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          {result.warnings?.length > 0 && (
+            <div className='quote-warnings'>
+              {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
+            </div>
+          )}
+
+          <div className='quote-summary'>
+            {result.discount_amount > 0 && (
+              <>
+                <div className='quote-summary-row'><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
+                <div className='quote-summary-row'><span>הנחה ({result.discount_percent}%):</span><span style={{color:'red'}}>-₪{result.discount_amount.toFixed(2)}</span></div>
+                <div className='quote-summary-row'><span>סה"כ לאחר הנחה:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
+              </>
+            )}
+            <div className='quote-summary-row'><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
+            <div className='quote-summary-row'>
+              <div className='quote-total-box'>סה"כ לתשלום: {result.total.toFixed(2)} ₪</div>
+            </div>
+          </div>
+
+          {result.layout && (
+            <div className='layout-page print-page-break'>
+              <h3 className='layout-title'>גיליון פריסה — {result.print?.name}</h3>
+              <div className='layout-meta'>
+                מידות: {form.width_cm/100}×{form.height_cm/100} מ' · כמות: {result.quantity} · גליל: {result.layout.roll_width_m} מ'<br/>
+                {result.layout.columns} טורים × {result.layout.rows} שורות · אורך נדרש: {result.layout.required_length_m} מ' · בזבוז: {result.layout.waste_percent}%
+              </div>
+              <div className='layout-visual'>
+                {Array.from({length: Math.min(result.layout.columns * result.layout.rows, result.quantity)}).map((_, i) => (
+                  <div key={i} className='layout-item-box' style={{
+                    width: `${(1/result.layout.columns)*100}%`,
+                    height: `${(1/result.layout.rows)*100}%`,
+                    boxSizing:'border-box', float:'right',
+                    borderBottom: Math.floor(i/result.layout.columns) < result.layout.rows-1 ? '1px solid #1a2a44' : 'none'
+                  }}>{i+1}</div>
+                ))}
+                <div style={{clear:'both'}} />
+              </div>
+            </div>
+          )}
+
+          <div style={{textAlign:'center',marginTop:'20px'}}>
+            <button className='btn btn-outline' onClick={() => window.print()}>🖨️ הדפס הצעה</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
 function AdminPanel({ token }) {
   const [tab, setTab] = useState("materials");
   const [materials, setMaterials] = useState([]);
   const [categories, setCategories] = useState([]);
   const [users, setUsers] = useState([]);
   const [quotes, setQuotes] = useState([]);
-  const [newMat, setNewMat] = useState({ category_id: "", name: "", price_per_sqm: "", max_width: "", max_length: "" });
+  const [newMat, setNewMat] = useState({ category_id: '', name: '', price_per_sqm: '', max_width: '', max_length: '', min_price: '', min_linear_m: '', min_unit: 'sqm' });
   const [loading, setLoading] = useState(false);
-  const [msg, setMsg] = useState("");
+  const [msg, setMsg] = useState('');
   const [editingMaterial, setEditingMaterial] = useState(null);
   const [editingUser, setEditingUser] = useState(null);
+  const [viewingQuote, setViewingQuote] = useState(null);
+  const [editingQuote, setEditingQuote] = useState(null);
 
-  useEffect(() => { loadMaterials(); loadCategories(); }, []);
+  useEffect(() => { loadMaterials(); loadCategories(); loadUsers(); }, []);
   useEffect(() => {
-    if (tab === "users") loadUsers();
-    if (tab === "quotes") loadQuotes();
+    if (tab === 'quotes') loadQuotes();
   }, [tab]);
 
   async function loadMaterials() {
@@ -653,11 +1086,13 @@ function AdminPanel({ token }) {
       <div className="panel-header">
         <h2>👑 פאנל ניהול</h2>
         <div className="tab-group">
-          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"]].map(
+          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"],["new-quote","➕ הפק הצעה"]].map(
             ([k, v]) => <button key={k} className={`tab ${tab===k?"active":""}`} onClick={()=>setTab(k)}>{v}</button>
           )}
         </div>
       </div>
+
+      {tab === "new-quote" && <AdminQuoteTab token={token} materials={materials} users={users} />}
 
       {tab === "products" && <ProductsAdminTab token={token} materials={materials} />}
 
@@ -665,26 +1100,54 @@ function AdminPanel({ token }) {
         <div>
           <div className="card">
             <h3>➕ הוסף חומר חדש</h3>
-            <form onSubmit={addMaterial} className="form form-inline">
-              <div className="form-group">
+            <form onSubmit={addMaterial} className='form form-inline'>
+              <div className='form-group'>
                 <label>קטגוריה</label>
                 <select value={newMat.category_id} onChange={e => setNewMat({...newMat, category_id: e.target.value})} required>
-                  <option value="">בחר קטגוריה</option>
+                  <option value=''>בחר קטגוריה</option>
                   {categories.map(c => <option key={c.id} value={c.id}>{c.display_name}</option>)}
                 </select>
               </div>
-              <div className="form-group">
+              <div className='form-group'>
                 <label>שם החומר</label>
-                <input type="text" placeholder="ויניל גלוס..." value={newMat.name}
+                <input type='text' placeholder='ויניל גלוס...' value={newMat.name}
                   onChange={e => setNewMat({...newMat, name: e.target.value})} required />
               </div>
-              <div className="form-group">
-                <label>מחיר ל-SQM (₪)</label>
-                <input type="number" step="0.01" placeholder="35.00" value={newMat.price_per_sqm}
+              <div className='form-group'>
+                <label>מחיר למ"ר (₪)</label>
+                <input type='number' step='0.01' placeholder='35.00' value={newMat.price_per_sqm}
                   onChange={e => setNewMat({...newMat, price_per_sqm: e.target.value})} required />
               </div>
-              <button type="submit" className="btn btn-primary" disabled={loading}>
-                {loading ? "..." : "הוסף"}
+              <div className='form-group'>
+                <label>מחיר מינימום (₪)</label>
+                <input type='number' step='0.01' placeholder='ללא' value={newMat.min_price}
+                  onChange={e => setNewMat({...newMat, min_price: e.target.value})} />
+              </div>
+              <div className='form-group'>
+                <label>מינימום לחיוב</label>
+                <div style={{display:'flex', gap:'4px'}}>
+                  <select value={newMat.min_unit} onChange={e => setNewMat({...newMat, min_unit: e.target.value})} style={{flex:'0 0 110px'}}>
+                    <option value='sqm'>מ"ר</option>
+                    <option value='linear'>מ' רץ</option>
+                  </select>
+                  {newMat.min_unit === 'sqm'
+                    ? <input type='number' step='0.01' placeholder='0.1' value={newMat.min_sqm || ''} onChange={e => setNewMat({...newMat, min_sqm: e.target.value})} style={{flex:1}} />
+                    : <input type='number' step='0.1' placeholder='1.0' value={newMat.min_linear_m} onChange={e => setNewMat({...newMat, min_linear_m: e.target.value})} style={{flex:1}} />
+                  }
+                </div>
+              </div>
+              <div className='form-group'>
+                <label>רוחב מקס' (ס"מ) — ריק=∞</label>
+                <input type='number' step='0.1' placeholder='∞' value={newMat.max_width}
+                  onChange={e => setNewMat({...newMat, max_width: e.target.value})} />
+              </div>
+              <div className='form-group'>
+                <label>אורך מקס' (ס"מ) — ריק=∞</label>
+                <input type='number' step='0.1' placeholder='∞' value={newMat.max_length}
+                  onChange={e => setNewMat({...newMat, max_length: e.target.value})} />
+              </div>
+              <button type='submit' className='btn btn-primary' disabled={loading}>
+                {loading ? '...' : 'הוסף'}
               </button>
             </form>
             {msg && <div className="alert">{msg}</div>}
@@ -779,17 +1242,21 @@ function AdminPanel({ token }) {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>לקוח</th><th>מידות (ס"מ)</th><th>מ"ר</th><th>כמות</th><th>סה"כ</th><th>תאריך</th></tr>
+                <tr><th>לקוח</th><th>מידות (ס"מ)</th><th>מ"ר</th><th>כמות</th><th>סה"כ</th><th>תאריך</th><th>פעולות</th></tr>
               </thead>
               <tbody>
                 {quotes.map(q => (
                   <tr key={q.id}>
-                    <td>{q.user_name || "אנונימי"}</td>
+                    <td>{q.user_name || 'אנונימי'}</td>
                     <td>{q.width_cm} × {q.height_cm}</td>
                     <td>{q.sqm.toFixed(3)}</td>
                     <td>{q.quantity}</td>
                     <td className="price">₪{q.total_price.toFixed(2)}</td>
-                    <td>{new Date(q.created_at).toLocaleDateString("he-IL")}</td>
+                    <td>{new Date(q.created_at).toLocaleDateString('he-IL')}</td>
+                    <td>
+                      <button className='btn btn-sm btn-edit' title='צפה' onClick={() => setViewingQuote(q)}>👁️</button>
+                      <button className='btn btn-sm btn-outline' title='ערוך' onClick={() => setEditingQuote(q)} style={{marginRight:'4px'}}>✏️</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -797,6 +1264,14 @@ function AdminPanel({ token }) {
           </div>
         </div>
       )}
+
+      {viewingQuote && (
+        <QuoteViewModal quote={viewingQuote} token={token} materials={materials} onClose={() => setViewingQuote(null)} />
+      )}
+      {editingQuote && (
+        <QuoteEditModal quote={editingQuote} token={token} materials={materials} onClose={() => { setEditingQuote(null); loadQuotes(); }} />
+      )}
+
     </div>
   );
 }
@@ -1007,7 +1482,7 @@ function UserPanel({ token, userName }) {
                 </>
               )}
               <div className='quote-summary-row'>
-                <span>מע"מ (17%):</span>
+                <span>מע"מ (18%):</span>
                 <span>₪{result.vat_amount.toFixed(2)}</span>
               </div>
               <div className='quote-summary-row' style={{marginTop: '10px'}}>
