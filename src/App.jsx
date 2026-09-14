@@ -86,7 +86,7 @@ export default function App() {
         {screen === "user" && <UserPanel token={token} userName={userName} />}
       </main>
       <footer className="footer">
-        <p>🛑 שלטי הצפון © {new Date().getFullYear()} | כל הזכויות שמורות</p>
+        <p>שלטי הצפון © {new Date().getFullYear()} | כל הזכויות שמורות</p>
       </footer>
     </div>
   );
@@ -97,11 +97,8 @@ function Header({ role, userName, onLogout, screen, setScreen }) {
   return (
     <header className="header">
       <div className="header-brand">
-        <span className="brand-icon">🛑</span>
-        <div>
-          <h1 className="brand-title">שלטי הצפון</h1>
-          <p className="brand-sub">מערכת תמחור מתקדמת</p>
-        </div>
+        <img src="/logo.png" alt="שלטי הצפון" className="brand-logo" />
+        <p className="brand-sub">מערכת תמחור מתקדמת</p>
       </div>
       {role && (
         <div className="header-actions">
@@ -1151,11 +1148,7 @@ function OrderResultView({ result, isAdmin }) {
         <div className='quote-header'>
           <div><h1 className='quote-title'>הצעת מחיר</h1></div>
           <div className='quote-logo'>
-            <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height: '40px'}}>
-              <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
-              <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
-              <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
-            </svg>
+            <img src='/logo.png' alt='שלטי הצפון' style={{height: '40px'}} />
           </div>
         </div>
         <table className='quote-table'>

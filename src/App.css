@@ -63,22 +63,10 @@ body {
   gap: 14px;
 }
 
-.brand-icon {
-  font-size: 2.4rem;
+.brand-logo {
+  height: 44px;
+  width: auto;
   filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
-  animation: pulse-icon 3s ease-in-out infinite;
-}
-
-@keyframes pulse-icon {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.05); }
-}
-
-.brand-title {
-  font-size: 1.7rem;
-  font-weight: 800;
-  letter-spacing: -0.5px;
-  text-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }
 
 .brand-sub {
@@ -653,7 +641,6 @@ body {
 /* ─── Responsive ─────────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .header { flex-direction: column; gap: 12px; text-align: center; }
-  .brand-title { font-size: 1.4rem; }
   .panel-grid { grid-template-columns: 1fr; }
   .form-row { grid-template-columns: 1fr; }
   .tab-group { flex-wrap: wrap; }
@@ -666,7 +653,7 @@ body {
 @media (max-width: 480px) {
   .card { padding: 18px 14px; }
   .auth-card { max-width: 100%; }
-  .brand-icon { font-size: 1.8rem; }
+  .brand-logo { height: 34px; }
 }
 
 /* ─── Print ──────────────────────────────────────────────────────────────────── */
