@@ -3,17 +3,21 @@
 FastAPI + SQLite + JWT Authentication
 """
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List
 import sqlite3
 import hashlib
 import jwt
 import os
+import io
 from datetime import datetime, timedelta
 from contextlib import contextmanager
+from PIL import Image
+import pymupdf  # for rasterizing PDF artwork to a preview image
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 SECRET_KEY = os.getenv("SECRET_KEY", "shlate-tzafon-secret-key-change-in-production")
@@ -147,6 +151,59 @@ def init_db():
                 breakdown TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
+        # Uploaded artwork (image/PDF). Stored as a blob in the DB itself rather than on the
+        # container's filesystem, since there's no persistent disk mounted yet — this way the
+        # same future disk-mount fix that protects the DB automatically protects files too.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS order_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT,
+                content_type TEXT,
+                data BLOB NOT NULL,
+                width_px INTEGER,
+                height_px INTEGER,
+                original_content_type TEXT,
+                original_data BLOB,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # A multi-item order/cart: one or more order_items, each independently sized and
+        # materialed, nested together per-material across the whole order for pricing.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                total_price REAL NOT NULL,
+                breakdown TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+
+        # `status` lets a future "nest everything approved for production" batch job pool
+        # order_items across many separate orders by querying status='approved' directly,
+        # without a schema change.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS order_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                width_cm REAL NOT NULL,
+                height_cm REAL NOT NULL,
+                quantity INTEGER DEFAULT 1,
+                print_material_id INTEGER,
+                base_material_id INTEGER,
+                lamination_id INTEGER,
+                file_id INTEGER,
+                offset_cm REAL DEFAULT 0,
+                price REAL,
+                status TEXT DEFAULT 'pending',
+                FOREIGN KEY (order_id) REFERENCES orders(id),
+                FOREIGN KEY (file_id) REFERENCES order_files(id)
             )
         """)
 
@@ -317,6 +374,22 @@ class QuoteUpdate(BaseModel):
     lamination_id: Optional[int] = None
     discount_override: Optional[float] = None
 
+class OrderItemIn(BaseModel):
+    width_cm: float
+    height_cm: float
+    quantity: int = 1
+    print_material_id: Optional[int] = None
+    base_material_id: Optional[int] = None
+    lamination_id: Optional[int] = None
+    file_id: Optional[int] = None
+    offset_cm: Optional[float] = 0  # extra margin/frame added around the object, per side
+
+class OrderCalculateRequest(BaseModel):
+    items: List[OrderItemIn]
+    user_id: Optional[int] = None
+    discount_override: Optional[float] = None
+    save_order: Optional[bool] = True
+
 class UserUpdate(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -383,6 +456,112 @@ def _fit_layout(item_w, item_h, qty, roll_w):
     return {"cols": cols, "rows": rows_n, "is_rotated": is_rotated, "required_length_cm": best_len}
 
 
+def fit_layout_multi(pieces, roll_w):
+    """Simple shelf (row) bin-packing of many differently-sized pieces onto a roll/sheet of
+    width `roll_w` (cm), for a whole *order* of items sharing the same material — or, later,
+    for a batch of items pooled from many separate approved orders/quotes. Deliberately kept
+    order-agnostic (it only knows about pieces, not who they belong to) so the same function
+    can drive both today's per-order nesting and a future "nest everything approved for
+    production today" batch job without changes.
+
+    `pieces`: list of {"w", "h", "qty", "ref"} dicts (cm; `ref` is an opaque id the caller
+    attaches to trace a placement back to its source item/order).
+
+    Returns {"shelves": [...], "total_length_cm": float, "used_area_cm2": float, "unfit": [...]}
+    — `unfit` lists pieces that don't fit the roll width at all (in either orientation); the
+    caller is responsible for pricing/warning about those separately."""
+    units = []
+    unfit = []
+    for p in pieces:
+        w, h, qty, ref = p["w"], p["h"], p["qty"], p.get("ref")
+        if w <= 0 or h <= 0 or qty <= 0:
+            continue
+        fits_upright = w <= roll_w
+        fits_rotated = h <= roll_w
+        if not fits_upright and not fits_rotated:
+            unfit.append(p)
+            continue
+        # Prefer the given orientation; rotate only if it's the only one that fits.
+        uw, uh = (w, h) if fits_upright else (h, w)
+        for _ in range(qty):
+            units.append((uw, uh, ref))
+
+    # Next-fit-decreasing-height shelf packing: tallest pieces first, fill each shelf's
+    # width left-to-right, start a new shelf once the current one can't fit the next piece.
+    units.sort(key=lambda u: u[1], reverse=True)
+    shelves = []
+    shelf = None
+    for uw, uh, ref in units:
+        if shelf is not None and shelf["used_width"] + uw <= roll_w + 1e-9:
+            shelf["items"].append({"x": shelf["used_width"], "w": uw, "h": uh, "ref": ref})
+            shelf["used_width"] += uw
+            shelf["height"] = max(shelf["height"], uh)
+        else:
+            if shelf is not None:
+                shelves.append(shelf)
+            shelf = {"height": uh, "used_width": uw, "items": [{"x": 0, "w": uw, "h": uh, "ref": ref}]}
+    if shelf is not None:
+        shelves.append(shelf)
+
+    total_length = sum(s["height"] for s in shelves)
+    used_area = sum(it["w"] * it["h"] for s in shelves for it in s["items"])
+    return {
+        "shelves": shelves,
+        "total_length_cm": total_length,
+        "used_area_cm2": used_area,
+        "unfit": unfit,
+    }
+
+
+def apply_material_minimums(row_dict, actual_sqm, actual_length_m, warnings):
+    """Given a material's already-computed job consumption (`actual_sqm`, and
+    `actual_length_m` if it's a roll material whose layout is known), bump the price up to
+    whatever per-material minimums apply (min_sqm / min_linear_m / min_price), appending an
+    explanatory warning — including how much more can be used for the same price — for each
+    minimum that kicks in. Shared by both single-item quotes and multi-item orders so the
+    same material behaves identically in either flow. Returns (price, actual_sqm) —
+    actual_sqm may itself be raised by a min_sqm minimum."""
+    price_per_sqm = row_dict["price_per_sqm"]
+    name = row_dict["name"]
+
+    min_sqm_mat = row_dict.get("min_sqm") or 0
+    if min_sqm_mat > 0 and actual_sqm < min_sqm_mat:
+        extra_sqm = min_sqm_mat - actual_sqm
+        actual_sqm = min_sqm_mat
+        warnings.append(
+            f"הופעל מ\"ר מינימום עבור '{name}' (מינ' {min_sqm_mat} מ\"ר) — "
+            f"ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
+        )
+
+    price = price_per_sqm * actual_sqm
+
+    min_linear_m = row_dict.get("min_linear_m") or 0
+    if min_linear_m > 0 and actual_length_m is not None and actual_length_m < min_linear_m:
+        extra_length = min_linear_m - actual_length_m
+        max_w = row_dict.get("max_width") or 0
+        min_sqm_from_linear = min_linear_m * (max_w / 100)
+        min_price_from_linear = price_per_sqm * min_sqm_from_linear
+        if min_price_from_linear > price:
+            price = min_price_from_linear
+            warnings.append(
+                f"הופעל מטר רץ מינימלי עבור '{name}' (מינ' {min_linear_m} מ') — "
+                f"ניתן לנצל עוד כ-{extra_length:.2f} מ' באותו מחיר"
+            )
+
+    min_price = row_dict.get("min_price") or 0
+    if min_price > 0 and price < min_price:
+        msg = f"הופעל מחיר מינימום עבור '{name}' (מינ' ₪{min_price} לעבודה)"
+        if price_per_sqm > 0:
+            max_sqm_at_min = min_price / price_per_sqm
+            extra_sqm = max_sqm_at_min - actual_sqm
+            if extra_sqm > 0.01:
+                msg += f" — ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
+        price = min_price
+        warnings.append(msg)
+
+    return price, actual_sqm
+
+
 def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None):
     sqm = (data.width_cm / 100) * (data.height_cm / 100)
     sqm = max(sqm, 0.1)
@@ -405,7 +584,6 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
         if not row:
             return 0, "לא נמצא", None, None
         row_dict = dict(row)
-        price_per_sqm = row_dict["price_per_sqm"]
 
         # Check dimension constraints
         max_w = row_dict.get("max_width") or 0
@@ -431,47 +609,12 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
 
         if layout:
             actual_sqm = (max_w / 100) * (layout["required_length_cm"] / 100)
+            actual_length_m = layout["required_length_cm"] / 100
         else:
             actual_sqm = sqm * data.quantity
+            actual_length_m = None
 
-        # Apply per-material minimum sqm for the whole job (post-layout)
-        min_sqm_mat = row_dict.get("min_sqm") or 0
-        if min_sqm_mat > 0 and actual_sqm < min_sqm_mat:
-            extra_sqm = min_sqm_mat - actual_sqm
-            actual_sqm = min_sqm_mat
-            warnings.append(
-                f"הופעל מ\"ר מינימום עבור '{row_dict['name']}' (מינ' {min_sqm_mat} מ\"ר) — "
-                f"ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
-            )
-
-        price = price_per_sqm * actual_sqm
-
-        # Apply minimum linear meter (roll materials only, post-layout)
-        min_linear_m = row_dict.get("min_linear_m") or 0
-        if min_linear_m > 0 and layout:
-            actual_length_m = layout["required_length_cm"] / 100
-            if actual_length_m < min_linear_m:
-                extra_length = min_linear_m - actual_length_m
-                min_sqm_from_linear = min_linear_m * (max_w / 100)
-                min_price_from_linear = price_per_sqm * min_sqm_from_linear
-                if min_price_from_linear > price:
-                    price = min_price_from_linear
-                    warnings.append(
-                        f"הופעל מטר רץ מינימלי עבור '{row_dict['name']}' (מינ' {min_linear_m} מ') — "
-                        f"ניתן לנצל עוד כ-{extra_length:.2f} מ' באותו מחיר"
-                    )
-
-        # Apply minimum price for the whole job (checked last, against the final price)
-        min_price = row_dict.get("min_price") or 0
-        if min_price > 0 and price < min_price:
-            msg = f"הופעל מחיר מינימום עבור '{row_dict['name']}' (מינ' ₪{min_price} לעבודה)"
-            if price_per_sqm > 0:
-                max_sqm_at_min = min_price / price_per_sqm
-                extra_sqm = max_sqm_at_min - actual_sqm
-                if extra_sqm > 0.01:
-                    msg += f" — ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
-            price = min_price
-            warnings.append(msg)
+        price, _ = apply_material_minimums(row_dict, actual_sqm, actual_length_m, warnings)
 
         return price, row_dict["name"], row_dict, layout
 
@@ -520,6 +663,143 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
         "layout": layout_details,
         "width_cm": data.width_cm,
         "height_cm": data.height_cm,
+    }
+
+
+def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_override=None):
+    """Price a whole multi-item order/cart together: items that share the same material
+    (per role — print/base/lamination) are nested onto that material's roll as ONE combined
+    job via fit_layout_multi(), so the price reflects what actually gets cut from the roll
+    across the whole order, and any per-material minimum is only charged once for the whole
+    group — not once per tiny line item. Non-roll (fixed-size sheet) materials have no shared
+    roll to nest onto, so they're still priced per item."""
+    discount_percent = 0
+    warnings = []
+    if user_id:
+        user_row = conn.execute("SELECT discount_percent FROM users WHERE id=?", (user_id,)).fetchone()
+        if user_row:
+            discount_percent = user_row["discount_percent"] or 0
+    if discount_override is not None:
+        discount_percent = discount_override
+
+    item_prices = [{"print": 0.0, "base": 0.0, "lamination": 0.0} for _ in items]
+    item_names = [{"print": "ללא", "base": "ללא", "lamination": "ללא"} for _ in items]
+    groups_out = []
+
+    def price_role(role, mat_id_attr):
+        by_material = {}
+        for idx, it in enumerate(items):
+            mat_id = getattr(it, mat_id_attr)
+            if not mat_id:
+                continue
+            by_material.setdefault(mat_id, []).append(idx)
+
+        for mat_id, idxs in by_material.items():
+            row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
+            if not row:
+                for idx in idxs:
+                    item_names[idx][role] = "לא נמצא"
+                continue
+            row_dict = dict(row)
+            name = row_dict["name"]
+            max_w = row_dict.get("max_width") or 0
+            max_l = row_dict.get("max_length") or 0
+
+            for idx in idxs:
+                item_names[idx][role] = name
+
+            fit_idxs = []
+            for idx in idxs:
+                it = items[idx]
+                if max_w > 0 and max_l > 0:
+                    req_min, req_max = min(it.width_cm, it.height_cm), max(it.width_cm, it.height_cm)
+                    mat_min, mat_max = min(max_w, max_l), max(max_w, max_l)
+                    if req_min > mat_min or req_max > mat_max:
+                        warnings.append(f"מידות חריגות עבור '{name}' (מקס' {max_w}×{max_l} ס\"מ) — פריט #{idx + 1}")
+                        continue
+                elif max_w > 0 and it.width_cm > max_w:
+                    warnings.append(f"רוחב חריג עבור '{name}' (מקס' {max_w} ס\"מ) — פריט #{idx + 1}")
+                    continue
+                elif max_l > 0 and it.height_cm > max_l:
+                    warnings.append(f"אורך חריג עבור '{name}' (מקס' {max_l} ס\"מ) — פריט #{idx + 1}")
+                    continue
+                fit_idxs.append(idx)
+
+            if not fit_idxs:
+                continue
+
+            if max_w > 0:
+                pieces = [{"w": items[idx].width_cm, "h": items[idx].height_cm,
+                           "qty": items[idx].quantity, "ref": idx} for idx in fit_idxs]
+                nest = fit_layout_multi(pieces, max_w)
+                for p in nest["unfit"]:
+                    warnings.append(f"מידות חריגות עבור '{name}' — פריט #{p['ref'] + 1} לא נכנס לרוחב הגליל ({max_w} ס\"מ)")
+                packed_idxs = [idx for idx in fit_idxs if idx not in {p["ref"] for p in nest["unfit"]}]
+                if not packed_idxs:
+                    continue
+
+                total_len_m = nest["total_length_cm"] / 100
+                actual_sqm = (max_w / 100) * total_len_m
+                group_price, actual_sqm = apply_material_minimums(row_dict, actual_sqm, total_len_m, warnings)
+
+                flat_areas = {idx: (items[idx].width_cm / 100) * (items[idx].height_cm / 100) * items[idx].quantity
+                              for idx in packed_idxs}
+                total_flat = sum(flat_areas.values()) or 1
+                for idx in packed_idxs:
+                    item_prices[idx][role] = group_price * (flat_areas[idx] / total_flat)
+
+                used_area = sum(flat_areas.values())
+                total_roll_area = (max_w / 100) * total_len_m
+                waste_percent = max(0, ((total_roll_area - used_area) / total_roll_area) * 100) if total_roll_area > 0 else 0
+
+                groups_out.append({
+                    "role": role, "material_name": name, "material_id": mat_id,
+                    "roll_width_m": round(max_w / 100, 2),
+                    "required_length_m": round(total_len_m, 2),
+                    "waste_percent": round(waste_percent, 1),
+                    "price": round(group_price, 2),
+                    "shelves": nest["shelves"],
+                    "item_refs": packed_idxs,
+                })
+            else:
+                for idx in fit_idxs:
+                    it = items[idx]
+                    item_sqm = max((it.width_cm / 100) * (it.height_cm / 100), 0.1) * it.quantity
+                    price, _ = apply_material_minimums(row_dict, item_sqm, None, warnings)
+                    item_prices[idx][role] = price
+
+    price_role("print", "print_material_id")
+    price_role("base", "base_material_id")
+    price_role("lamination", "lamination_id")
+
+    items_out = []
+    total_before_discount = 0.0
+    for idx, it in enumerate(items):
+        line_total = item_prices[idx]["print"] + item_prices[idx]["base"] + item_prices[idx]["lamination"]
+        total_before_discount += line_total
+        items_out.append({
+            "width_cm": it.width_cm, "height_cm": it.height_cm, "quantity": it.quantity,
+            "print": {"name": item_names[idx]["print"], "price": round(item_prices[idx]["print"], 2)},
+            "base": {"name": item_names[idx]["base"], "price": round(item_prices[idx]["base"], 2)},
+            "lamination": {"name": item_names[idx]["lamination"], "price": round(item_prices[idx]["lamination"], 2)},
+            "line_total": round(line_total, 2),
+        })
+
+    discount_amount = total_before_discount * (discount_percent / 100.0)
+    total_after_discount = total_before_discount - discount_amount
+    vat_amount = total_after_discount * 0.18  # VAT 18%
+    final_total = total_after_discount + vat_amount
+
+    return {
+        "items": items_out,
+        "groups": groups_out,
+        "subtotal": round(total_before_discount, 2),
+        "discount_percent": discount_percent,
+        "discount_amount": round(discount_amount, 2),
+        "total_after_discount": round(total_after_discount, 2),
+        "vat_amount": round(vat_amount, 2),
+        "total": round(final_total, 2),
+        "warnings": warnings,
     }
 
 
@@ -651,6 +931,133 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
               data.print_material_id, data.base_material_id, data.lamination_id,
               data.quantity, breakdown["total"], json.dumps(breakdown, ensure_ascii=False)))
 
+    return breakdown
+
+
+# ─── File Upload & Object Detection ─────────────────────────────────────────────
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15MB
+
+
+def detect_object_bbox(img):
+    """Return a normalized (0..1) bounding box {x0,y0,x1,y1} around the non-background
+    content of `img` — lets a customer print just their logo/graphic instead of the whole
+    (possibly padded) canvas. Uses the alpha channel when the image has real transparency,
+    otherwise treats near-white pixels as background."""
+    rgba = img.convert("RGBA")
+    alpha = rgba.split()[-1]
+    if alpha.getextrema() != (255, 255):
+        mask = alpha.point(lambda a: 255 if a > 10 else 0)
+    else:
+        gray = rgba.convert("RGB").convert("L")
+        mask = gray.point(lambda p: 255 if p < 245 else 0)
+    bbox = mask.getbbox()
+    w, h = img.size
+    if not bbox:
+        return {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 1.0}
+    x0, y0, x1, y1 = bbox
+    return {"x0": x0 / w, "y0": y0 / h, "x1": x1 / w, "y1": y1 / h}
+
+
+@app.post("/api/files/upload")
+async def upload_file(file: UploadFile = File(...), user=Depends(get_current_user)):
+    raw = await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="הקובץ גדול מהמותר (מקסימום 15MB)")
+
+    content_type = file.content_type or ""
+    is_pdf = content_type == "application/pdf" or (file.filename or "").lower().endswith(".pdf")
+    original_data = None
+    original_content_type = None
+
+    if is_pdf:
+        try:
+            doc = pymupdf.open(stream=raw, filetype="pdf")
+            pix = doc[0].get_pixmap(dpi=150)
+            data = pix.tobytes("png")
+            doc.close()
+        except Exception:
+            raise HTTPException(status_code=400, detail="לא ניתן לקרוא את קובץ ה-PDF")
+        original_data, original_content_type = raw, "application/pdf"
+        content_type = "image/png"
+    elif content_type.startswith("image/"):
+        try:
+            probe = Image.open(io.BytesIO(raw))
+            probe.verify()
+        except Exception:
+            raise HTTPException(status_code=400, detail="קובץ התמונה פגום או לא נתמך")
+        data = raw
+    else:
+        raise HTTPException(status_code=400, detail="פורמט קובץ לא נתמך (תמונה או PDF בלבד)")
+
+    img = Image.open(io.BytesIO(data))
+    width_px, height_px = img.size
+
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO order_files (filename, content_type, data, width_px, height_px,
+                original_content_type, original_data)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (file.filename, content_type, data, width_px, height_px,
+             original_content_type, original_data)
+        )
+        file_id = cur.lastrowid
+
+    return {"id": file_id, "filename": file.filename, "content_type": content_type,
+            "width_px": width_px, "height_px": height_px}
+
+
+@app.get("/api/files/{file_id}/raw")
+def get_file_raw(file_id: int):
+    with get_db() as conn:
+        row = conn.execute("SELECT data, content_type FROM order_files WHERE id=?", (file_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="קובץ לא נמצא")
+    return Response(content=row["data"], media_type=row["content_type"] or "application/octet-stream")
+
+
+@app.post("/api/files/{file_id}/detect-object")
+def detect_object(file_id: int, user=Depends(get_current_user)):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT data, width_px, height_px FROM order_files WHERE id=?", (file_id,)
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="קובץ לא נמצא")
+    try:
+        img = Image.open(io.BytesIO(row["data"]))
+    except Exception:
+        raise HTTPException(status_code=400, detail="לא ניתן לנתח את הקובץ")
+    return {"bbox": detect_object_bbox(img), "width_px": row["width_px"], "height_px": row["height_px"]}
+
+
+# ─── Orders (multi-item cart) ───────────────────────────────────────────────────
+def _save_order(conn, items: List[OrderItemIn], breakdown: dict, user_id):
+    import json
+    cur = conn.execute(
+        "INSERT INTO orders (user_id, total_price, breakdown) VALUES (?, ?, ?)",
+        (user_id, breakdown["total"], json.dumps(breakdown, ensure_ascii=False))
+    )
+    order_id = cur.lastrowid
+    for i, it in enumerate(items):
+        conn.execute(
+            """INSERT INTO order_items (order_id, width_cm, height_cm, quantity,
+                print_material_id, base_material_id, lamination_id, file_id, offset_cm, price)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (order_id, it.width_cm, it.height_cm, it.quantity,
+             it.print_material_id, it.base_material_id, it.lamination_id,
+             it.file_id, it.offset_cm or 0, breakdown["items"][i]["line_total"])
+        )
+    return order_id
+
+
+@app.post("/api/orders/calculate")
+def calculate_order(data: OrderCalculateRequest, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    payload = decode_token(credentials.credentials)
+    user_id = payload.get("id") if payload.get("role") == "user" else None
+    with get_db() as conn:
+        breakdown = compute_order(conn, data.items, user_id=user_id)
+        if data.save_order:
+            breakdown["id"] = _save_order(conn, data.items, breakdown, user_id)
     return breakdown
 
 
@@ -845,6 +1252,42 @@ def admin_calculate_quote(data: AdminQuoteRequest, admin=Depends(get_current_adm
                   data.print_material_id, data.base_material_id, data.lamination_id,
                   data.quantity, breakdown["total"], json.dumps(breakdown, ensure_ascii=False)))
     return breakdown
+
+
+@app.post("/api/admin/orders/calculate")
+def admin_calculate_order(data: OrderCalculateRequest, admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        breakdown = compute_order(conn, data.items, user_id=data.user_id, discount_override=data.discount_override)
+        if data.save_order:
+            breakdown["id"] = _save_order(conn, data.items, breakdown, data.user_id)
+    return breakdown
+
+
+@app.get("/api/admin/orders")
+def admin_get_orders(admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT o.*, u.first_name || ' ' || u.last_name as user_name, u.phone
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id
+            ORDER BY o.created_at DESC LIMIT 200
+        """).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/admin/orders/{order_id}")
+def admin_get_order(order_id: int, admin=Depends(get_current_admin)):
+    with get_db() as conn:
+        row = conn.execute("""
+            SELECT o.*, u.first_name || ' ' || u.last_name as user_name, u.phone
+            FROM orders o LEFT JOIN users u ON o.user_id = u.id
+            WHERE o.id=?
+        """, (order_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="הזמנה לא נמצאה")
+        items = conn.execute("SELECT * FROM order_items WHERE order_id=?", (order_id,)).fetchall()
+    result = dict(row)
+    result["items_raw"] = [dict(i) for i in items]
+    return result
 
 
 @app.post("/api/admin/products")

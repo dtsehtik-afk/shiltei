@@ -17,6 +17,23 @@ async function apiCall(endpoint, method = "GET", body = null, token = null) {
   return data;
 }
 
+async function uploadFile(file, token) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API}/api/files/upload`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "שגיאה בהעלאת הקובץ");
+  return data;
+}
+
+async function detectObject(fileId, token) {
+  return apiCall(`/api/files/${fileId}/detect-object`, "POST", null, token);
+}
+
 // Print only one specific section (by class name) as its own separate print job,
 // leaving every other section (including sections not meant for this viewer, like
 // an admin-only cutting layout) out of that print job entirely.
@@ -1152,6 +1169,481 @@ function AdminQuoteTab({ token, materials, users, onAddUser }) {
   );
 }
 
+// ─── Manual object selector (fallback when auto-detection isn't confirmed) ─────
+function ManualCropSelector({ src, onConfirm, onCancel }) {
+  const [rect, setRect] = useState(null);
+  const [dragStart, setDragStart] = useState(null);
+
+  function pointFromEvent(e) {
+    const box = e.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.min(Math.max((e.clientX - box.left) / box.width, 0), 1),
+      y: Math.min(Math.max((e.clientY - box.top) / box.height, 0), 1),
+    };
+  }
+  function handlePointerDown(e) {
+    const p = pointFromEvent(e);
+    setDragStart(p);
+    setRect({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+  }
+  function handlePointerMove(e) {
+    if (!dragStart) return;
+    const p = pointFromEvent(e);
+    setRect({
+      x0: Math.min(dragStart.x, p.x), y0: Math.min(dragStart.y, p.y),
+      x1: Math.max(dragStart.x, p.x), y1: Math.max(dragStart.y, p.y),
+    });
+  }
+
+  const valid = rect && (rect.x1 - rect.x0) > 0.02 && (rect.y1 - rect.y0) > 0.02;
+
+  return (
+    <div>
+      <p style={{fontSize: '0.85rem', margin: '6px 0'}}>גרור על התמונה כדי לסמן את האובייקט</p>
+      <div
+        style={{position: 'relative', display: 'inline-block', touchAction: 'none', cursor: 'crosshair', maxWidth: '100%'}}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={() => setDragStart(null)}
+      >
+        <img src={src} style={{display: 'block', maxWidth: '260px', maxHeight: '260px', userSelect: 'none'}} draggable={false} />
+        {rect && (
+          <div style={{
+            position: 'absolute',
+            left: `${rect.x0 * 100}%`, top: `${rect.y0 * 100}%`,
+            width: `${(rect.x1 - rect.x0) * 100}%`, height: `${(rect.y1 - rect.y0) * 100}%`,
+            border: '2px dashed #6c3fc5', background: 'rgba(108,63,197,0.15)', boxSizing: 'border-box',
+          }} />
+        )}
+      </div>
+      <div style={{marginTop: '8px', display: 'flex', gap: '8px'}}>
+        <button type='button' className='btn btn-primary' disabled={!valid} onClick={() => onConfirm(rect)}>✅ אשר בחירה</button>
+        <button type='button' className='btn btn-outline' onClick={onCancel}>ביטול</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Artwork upload + whole-file/object scoping + offset + size ───────────────
+function ArtworkPicker({ token, onChange }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const [file, setFile] = useState(null);
+  const [scope, setScope] = useState(null); // 'whole' | 'object'
+  const [autoBbox, setAutoBbox] = useState(null);
+  const [stage, setStage] = useState(null); // 'confirm' | 'manual' | 'done'
+  const [finalBbox, setFinalBbox] = useState(null);
+  const [offsetCm, setOffsetCm] = useState(0);
+  const [objW, setObjW] = useState('');
+  const [objH, setObjH] = useState('');
+
+  const previewUrl = file ? `${API}/api/files/${file.id}/raw` : null;
+  const aspect = (file && finalBbox)
+    ? ((finalBbox.x1 - finalBbox.x0) * file.width_px) / ((finalBbox.y1 - finalBbox.y0) * file.height_px)
+    : null;
+
+  async function handleFileSelect(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    setUploading(true); setError('');
+    setScope(null); setFinalBbox(null); setStage(null); setAutoBbox(null);
+    setObjW(''); setObjH('');
+    try {
+      const uploaded = await uploadFile(f, token);
+      setFile(uploaded);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function chooseWholeFile() {
+    setScope('whole');
+    setFinalBbox({x0: 0, y0: 0, x1: 1, y1: 1});
+    setStage('done');
+  }
+
+  async function chooseObject() {
+    setScope('object');
+    setError('');
+    try {
+      const res = await detectObject(file.id, token);
+      setAutoBbox(res.bbox);
+      setStage('confirm');
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  useEffect(() => {
+    if (!file || !finalBbox || !onChange) return;
+    const w = parseFloat(objW), h = parseFloat(objH);
+    if (!w || !h) return;
+    onChange({
+      file_id: file.id,
+      width_cm: w + offsetCm * 2,
+      height_cm: h + offsetCm * 2,
+      offset_cm: offsetCm,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, finalBbox, objW, objH, offsetCm]);
+
+  return (
+    <div className='artwork-picker'>
+      <label style={{display: 'block', marginBottom: '6px', fontSize: '0.85rem'}}>קובץ עיצוב (תמונה / PDF) — אופציונלי</label>
+      <input type='file' accept='image/*,application/pdf' onChange={handleFileSelect} disabled={uploading} />
+      {uploading && <div style={{fontSize: '0.85rem'}}>מעלה...</div>}
+      {error && <div className='alert alert-error' style={{marginTop: '6px'}}>{error}</div>}
+
+      {file && (
+        <div style={{marginTop: '10px'}}>
+          {!scope && (
+            <>
+              <img src={previewUrl} style={{maxWidth: '160px', maxHeight: '160px', display: 'block', border: '1px solid #ddd', borderRadius: '4px'}} />
+              <p style={{fontSize: '0.85rem', margin: '8px 0 4px'}}>להתייחס לכל הקובץ או רק לאובייקט שבתוכו?</p>
+              <div style={{display: 'flex', gap: '8px'}}>
+                <button type='button' className='btn btn-outline' onClick={chooseWholeFile}>📄 כל הקובץ</button>
+                <button type='button' className='btn btn-outline' onClick={chooseObject}>✂️ רק האובייקט</button>
+              </div>
+            </>
+          )}
+
+          {stage === 'confirm' && autoBbox && (
+            <div>
+              <div style={{position: 'relative', display: 'inline-block'}}>
+                <img src={previewUrl} style={{maxWidth: '260px', maxHeight: '260px', display: 'block'}} />
+                <div style={{
+                  position: 'absolute',
+                  left: `${autoBbox.x0 * 100}%`, top: `${autoBbox.y0 * 100}%`,
+                  width: `${(autoBbox.x1 - autoBbox.x0) * 100}%`, height: `${(autoBbox.y1 - autoBbox.y0) * 100}%`,
+                  border: '2px dashed #6c3fc5', background: 'rgba(108,63,197,0.15)', boxSizing: 'border-box',
+                }} />
+              </div>
+              <p style={{fontSize: '0.85rem', margin: '6px 0'}}>זה האובייקט שזוהה?</p>
+              <div style={{display: 'flex', gap: '8px'}}>
+                <button type='button' className='btn btn-primary' onClick={() => { setFinalBbox(autoBbox); setStage('done'); }}>✅ כן, נכון</button>
+                <button type='button' className='btn btn-outline' onClick={() => setStage('manual')}>✏️ לא, אסמן ידנית</button>
+              </div>
+            </div>
+          )}
+
+          {stage === 'manual' && (
+            <ManualCropSelector
+              src={previewUrl}
+              onConfirm={(rect) => { setFinalBbox(rect); setStage('done'); }}
+              onCancel={() => setStage('confirm')}
+            />
+          )}
+
+          {stage === 'done' && finalBbox && (
+            <div style={{marginTop: '10px'}}>
+              <div className='form-row'>
+                <div className='form-group'>
+                  <label>רוחב האובייקט (ס"מ)</label>
+                  <input type='number' step='0.1' value={objW}
+                    onChange={e => {
+                      const v = e.target.value; setObjW(v);
+                      if (aspect && v) setObjH((parseFloat(v) / aspect).toFixed(1));
+                    }} />
+                </div>
+                <div className='form-group'>
+                  <label>גובה האובייקט (ס"מ)</label>
+                  <input type='number' step='0.1' value={objH}
+                    onChange={e => {
+                      const v = e.target.value; setObjH(v);
+                      if (aspect && v) setObjW((parseFloat(v) * aspect).toFixed(1));
+                    }} />
+                </div>
+                <div className='form-group'>
+                  <label>מסגרת/אופסט מסביב (ס"מ)</label>
+                  <input type='number' step='0.1' min='0' value={offsetCm}
+                    onChange={e => setOffsetCm(parseFloat(e.target.value) || 0)} />
+                </div>
+              </div>
+              <p style={{fontSize: '0.8rem', opacity: 0.75}}>היחס בין רוחב לגובה נשמר אוטומטית לפי האובייקט/קובץ שנבחר.</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── One line item in a multi-item order/cart ──────────────────────────────────
+function CartItemRow({ index, item, materials, onChange, onRemove, token }) {
+  const byCategory = (name) => materials.filter(m => m.category_name === name && m.active);
+
+  function update(patch) {
+    onChange(index, {...item, ...patch});
+  }
+
+  return (
+    <div className='card' style={{marginBottom: '10px', background: 'var(--surface-2, rgba(0,0,0,0.02))'}}>
+      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+        <h4 style={{margin: 0}}>פריט #{index + 1}</h4>
+        <button type='button' className='btn btn-sm btn-danger' onClick={() => onRemove(index)}>🗑️ הסר</button>
+      </div>
+      <div className='form-row'>
+        <div className='form-group'>
+          <label>רוחב (ס"מ){item.from_artwork ? ' — מהעיצוב' : ''}</label>
+          <input type='number' step='0.1' value={item.width_cm}
+            onChange={e => update({width_cm: e.target.value, from_artwork: false})} required />
+        </div>
+        <div className='form-group'>
+          <label>גובה (ס"מ){item.from_artwork ? ' — מהעיצוב' : ''}</label>
+          <input type='number' step='0.1' value={item.height_cm}
+            onChange={e => update({height_cm: e.target.value, from_artwork: false})} required />
+        </div>
+        <div className='form-group'>
+          <label>כמות</label>
+          <input type='number' min='1' value={item.quantity}
+            onChange={e => update({quantity: e.target.value})} required />
+        </div>
+      </div>
+      <div className='form-row'>
+        <div className='form-group'>
+          <label>🖨️ הדפסה</label>
+          <select value={item.print_material_id} onChange={e => update({print_material_id: e.target.value})}>
+            <option value=''>ללא</option>
+            {byCategory('PRINT').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+        </div>
+        <div className='form-group'>
+          <label>🪵 בסיס</label>
+          <select value={item.base_material_id} onChange={e => update({base_material_id: e.target.value})}>
+            <option value=''>ללא</option>
+            {byCategory('BASE').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+        </div>
+        <div className='form-group'>
+          <label>✨ למינציה</label>
+          <select value={item.lamination_id} onChange={e => update({lamination_id: e.target.value})}>
+            <option value=''>ללא</option>
+            {byCategory('LAMINATION').map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+          </select>
+        </div>
+      </div>
+      <ArtworkPicker token={token} onChange={(art) => update({
+        file_id: art.file_id, width_cm: art.width_cm.toFixed(1), height_cm: art.height_cm.toFixed(1),
+        offset_cm: art.offset_cm, from_artwork: true,
+      })} />
+    </div>
+  );
+}
+
+const emptyCartItem = () => ({
+  width_cm: '', height_cm: '', quantity: 1,
+  print_material_id: '', base_material_id: '', lamination_id: '',
+  file_id: null, offset_cm: 0,
+});
+
+// ─── Multi-item order/cart: combined nesting across all items per material ────
+function OrderCartTab({ token, materials, users, isAdmin, onAddUser }) {
+  const [items, setItems] = useState([emptyCartItem()]);
+  const [userId, setUserId] = useState('');
+  const [discountOverride, setDiscountOverride] = useState('');
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [showAddUser, setShowAddUser] = useState(false);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const roleLabel = {print: '🖨️ הדפסה', base: '🪵 בסיס', lamination: '✨ למינציה'};
+
+  function addRow() { setItems(prev => [...prev, emptyCartItem()]); }
+  function updateRow(idx, newItem) { setItems(prev => prev.map((it, i) => i === idx ? newItem : it)); }
+  function removeRow(idx) { setItems(prev => prev.filter((_, i) => i !== idx)); }
+
+  async function handleAddUser(data) {
+    const newUser = await onAddUser(data);
+    setUserId(String(newUser.id));
+    setNewCustomerName('');
+    setShowAddUser(false);
+    return newUser;
+  }
+
+  async function calculate(e) {
+    e.preventDefault();
+    setLoading(true); setError(''); setResult(null);
+    try {
+      const payload = {
+        items: items.map(it => ({
+          width_cm: parseFloat(it.width_cm),
+          height_cm: parseFloat(it.height_cm),
+          quantity: parseInt(it.quantity) || 1,
+          print_material_id: it.print_material_id ? parseInt(it.print_material_id) : null,
+          base_material_id: it.base_material_id ? parseInt(it.base_material_id) : null,
+          lamination_id: it.lamination_id ? parseInt(it.lamination_id) : null,
+          file_id: it.file_id || null,
+          offset_cm: it.offset_cm || 0,
+        })),
+        save_order: true,
+      };
+      let res;
+      if (isAdmin) {
+        payload.user_id = userId ? parseInt(userId) : null;
+        payload.discount_override = discountOverride !== '' ? parseFloat(discountOverride) : null;
+        res = await apiCall('/api/admin/orders/calculate', 'POST', payload, token);
+      } else {
+        res = await apiCall('/api/orders/calculate', 'POST', payload, token);
+      }
+      setResult(res);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className='card'>
+        <h3>🧺 הזמנה מרובת פריטים</h3>
+        <p style={{fontSize: '0.85rem', opacity: 0.75}}>
+          כל הפריטים שמשתמשים באותו חומר נפרסים ומחושבים יחד על אותו גליל, לניצול מקסימלי של החומר.
+        </p>
+
+        {isAdmin && (
+          <div className='form'>
+            <div className='form-row'>
+              <div className='form-group'>
+                <label>לקוח (אופציונלי)</label>
+                <select value={userId} onChange={e => setUserId(e.target.value)}>
+                  <option value=''>-- ללא שיוך לקוח --</option>
+                  {users.map(u => <option key={u.id} value={u.id}>{u.first_name} {u.last_name} ({u.phone})</option>)}
+                </select>
+              </div>
+              <div className='form-group'>
+                <label>הנחה ידנית (%) — ריק = לפי לקוח</label>
+                <input type='number' min='0' max='100' step='0.5' value={discountOverride}
+                  onChange={e => setDiscountOverride(e.target.value)} />
+              </div>
+            </div>
+            <div className='form-row'>
+              <div className='form-group' style={{flex: 1}}>
+                <label>לקוח חדש בדלפק? הכנס שם ולחץ "הוסף לקוח חדש"</label>
+                <div style={{display: 'flex', gap: '8px'}}>
+                  <input type='text' placeholder='שם הלקוח' style={{flex: 1}} value={newCustomerName}
+                    onChange={e => setNewCustomerName(e.target.value)} />
+                  <button type='button' className='btn btn-outline' onClick={() => setShowAddUser(true)}>➕ הוסף לקוח חדש</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {items.map((item, idx) => (
+          <CartItemRow key={idx} index={idx} item={item} materials={materials}
+            onChange={updateRow} onRemove={removeRow} token={token} />
+        ))}
+        <button type='button' className='btn btn-outline' onClick={addRow}>➕ הוסף פריט להזמנה</button>
+
+        {error && <div className='alert alert-error' style={{marginTop: '10px'}}>{error}</div>}
+        <div style={{marginTop: '14px'}}>
+          <button className='btn btn-primary btn-full' onClick={calculate} disabled={loading || items.length === 0}>
+            {loading ? 'מחשב...' : '🧮 חשב ופרוס הזמנה'}
+          </button>
+        </div>
+      </div>
+
+      {result && (
+        <div className='card result-card' style={{marginTop: '16px'}}>
+          <div className='print-order-body'>
+            <div className='quote-header'>
+              <div><h1 className='quote-title'>הצעת מחיר — הזמנה מרובת פריטים</h1></div>
+              <div className='quote-logo'>
+                <svg viewBox='0 0 100 50' fill='none' xmlns='http://www.w3.org/2000/svg' style={{height: '40px'}}>
+                  <path d='M10,25 C10,15 25,10 40,25 C25,40 10,35 10,25 Z' fill='#29B6F6'/>
+                  <path d='M30,25 C30,15 45,10 60,25 C45,40 30,35 30,25 Z' fill='#AB47BC'/>
+                  <path d='M50,25 C50,15 65,10 80,25 C65,40 50,35 50,25 Z' fill='#FFA726'/>
+                </svg>
+              </div>
+            </div>
+            <table className='quote-table'>
+              <thead><tr><th>#</th><th>מידות (ס"מ)</th><th>כמות</th><th>הדפסה</th><th>סה"כ</th></tr></thead>
+              <tbody>
+                {result.items.map((it, i) => (
+                  <tr key={i}>
+                    <td>{i + 1}</td>
+                    <td dir='ltr'>{it.width_cm} × {it.height_cm}</td>
+                    <td>{it.quantity}</td>
+                    <td>{it.print?.name}</td>
+                    <td>₪{it.line_total.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {result.warnings?.length > 0 && (
+              <div className='quote-warnings'>
+                {result.warnings.map((w, i) => <div key={i} className='quote-warning-item'>⚠️ {w}</div>)}
+              </div>
+            )}
+            <div className='quote-summary'>
+              {result.discount_amount > 0 && (<>
+                <div className='quote-summary-row'><span>לפני הנחה:</span><span>₪{result.subtotal.toFixed(2)}</span></div>
+                <div className='quote-summary-row'><span>הנחה ({result.discount_percent}%):</span><span style={{color: 'red'}}>-₪{result.discount_amount.toFixed(2)}</span></div>
+                <div className='quote-summary-row'><span>סה"כ אחרי הנחה:</span><span>₪{result.total_after_discount.toFixed(2)}</span></div>
+              </>)}
+              <div className='quote-summary-row'><span>מע"מ (18%):</span><span>₪{result.vat_amount.toFixed(2)}</span></div>
+              <div className='quote-summary-row'><div className='quote-total-box'>סה"כ לתשלום: {result.total.toFixed(2)} ₪</div></div>
+            </div>
+          </div>
+
+          {isAdmin && result.groups?.length > 0 && (
+            <div className='print-order-layout'>
+              {result.groups.map((g, gi) => {
+                const totalLenCm = g.required_length_m * 100;
+                const rollWCm = g.roll_width_m * 100;
+                let runningTop = 0;
+                return (
+                  <div key={gi} className='layout-page' style={{marginTop: '16px'}}>
+                    <h3 className='layout-title'>גיליון פריסה — {g.material_name} ({roleLabel[g.role] || g.role})</h3>
+                    <div className='layout-meta'>
+                      רוחב גליל: {g.roll_width_m} מ' · אורך נדרש: {g.required_length_m} מ' · בזבוז: {g.waste_percent}%
+                    </div>
+                    <div style={{position: 'relative', width: '100%', paddingBottom: `${(totalLenCm / rollWCm) * 100}%`, border: '1px solid #1a2a44', background: '#fff', marginTop: '8px'}}>
+                      {g.shelves.map((shelf, si) => {
+                        const top = runningTop;
+                        runningTop += shelf.height;
+                        return (
+                          <div key={si} style={{
+                            position: 'absolute', left: 0, width: '100%',
+                            top: `${(top / totalLenCm) * 100}%`, height: `${(shelf.height / totalLenCm) * 100}%`,
+                          }}>
+                            {shelf.items.map((it, ii) => (
+                              <div key={ii} style={{
+                                position: 'absolute', left: `${(it.x / rollWCm) * 100}%`, top: 0,
+                                width: `${(it.w / rollWCm) * 100}%`, height: '100%',
+                                border: '1px solid #6c3fc5', boxSizing: 'border-box',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem',
+                              }}>#{it.ref + 1}</div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div style={{textAlign: 'center', marginTop: '20px'}}>
+            <button className='btn btn-outline' onClick={() => printSection('print-order-body')}>🖨️ הדפס הצעת מחיר</button>
+            {isAdmin && result.groups?.length > 0 && (
+              <button className='btn btn-outline' style={{marginRight: '8px'}} onClick={() => printSection('print-order-layout')}>🖨️ הדפס גיליונות פריסה</button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showAddUser && (
+        <AddUserModal initialName={newCustomerName} onSave={handleAddUser} onClose={() => setShowAddUser(false)} />
+      )}
+    </div>
+  );
+}
 
 
 function AdminPanel({ token }) {
@@ -1257,13 +1749,14 @@ function AdminPanel({ token }) {
       <div className="panel-header">
         <h2>👑 פאנל ניהול</h2>
         <div className="tab-group">
-          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"],["new-quote","➕ הפק הצעה"]].map(
+          {[["materials","🧱 חומרים"],["products","🛍️ מוצרים"],["users","👥 לקוחות"],["quotes","📋 הצעות"],["new-quote","➕ הפק הצעה"],["cart-order","🧺 הזמנה מרובת פריטים"]].map(
             ([k, v]) => <button key={k} className={`tab ${tab===k?"active":""}`} onClick={()=>setTab(k)}>{v}</button>
           )}
         </div>
       </div>
 
       {tab === "new-quote" && <AdminQuoteTab token={token} materials={materials} users={users} onAddUser={addUser} />}
+      {tab === "cart-order" && <OrderCartTab token={token} materials={materials} users={users} isAdmin={true} onAddUser={addUser} />}
 
       {tab === "products" && <ProductsAdminTab token={token} materials={materials} />}
 
@@ -1459,6 +1952,7 @@ function AdminPanel({ token }) {
 // ─── User Panel ───────────────────────────────────────────────────────────────
 
 function UserPanel({ token, userName }) {
+  const [subTab, setSubTab] = useState('single');
   const [materials, setMaterials] = useState([]);
   const [categories, setCategories] = useState([]);
   const [products, setProducts] = useState([]);
@@ -1509,8 +2003,17 @@ function UserPanel({ token, userName }) {
       <div className='panel-header'>
         <h2>שלום, {userName}!</h2>
         <p className='subtitle'>בחר חומרים לקבלת הצעת מחיר</p>
+        <div className='tab-group'>
+          <button className={`tab ${subTab === 'single' ? 'active' : ''}`} onClick={() => setSubTab('single')}>📋 הצעה בודדת</button>
+          <button className={`tab ${subTab === 'cart' ? 'active' : ''}`} onClick={() => setSubTab('cart')}>🧺 הזמנה מרובת פריטים</button>
+        </div>
       </div>
 
+      {subTab === 'cart' && (
+        <OrderCartTab token={token} materials={materials} users={[]} isAdmin={false} />
+      )}
+
+      {subTab === 'single' && (
       <div className='panel-grid'>
         <div className='card'>
           <h3>📋 מחשבון הצעת מחיר</h3>
@@ -1685,6 +2188,7 @@ function UserPanel({ token, userName }) {
         )}
         {/* Cutting/layout sheet is admin-only — never shown or printed for customers. */}
       </div>
+      )}
     </div>
   );
 }
