@@ -582,6 +582,7 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
             return 0, "ללא", None, None
         row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
         if not row:
+            warnings.append(f"חומר שנבחר (מזהה #{mat_id}) לא נמצא במערכת — ייתכן שהמחירון התאפס לאחר דיפלוי. בחר/י את החומר מחדש.")
             return 0, "לא נמצא", None, None
         row_dict = dict(row)
 
@@ -697,6 +698,7 @@ def compute_order(conn, items: List[OrderItemIn], user_id=None, discount_overrid
         for mat_id, idxs in by_material.items():
             row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
             if not row:
+                warnings.append(f"חומר שנבחר (מזהה #{mat_id}) לא נמצא במערכת — ייתכן שהמחירון התאפס לאחר דיפלוי. בחר/י את החומר מחדש עבור פריט #{idxs[0] + 1}.")
                 for idx in idxs:
                     item_names[idx][role] = "לא נמצא"
                 continue
