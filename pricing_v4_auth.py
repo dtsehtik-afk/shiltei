@@ -25,8 +25,8 @@ app = FastAPI(title="שלטי הצפון API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173", "*"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -470,7 +470,6 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
             user_row = conn.execute("SELECT discount_percent FROM users WHERE id=?", (user_id,)).fetchone()
             if user_row:
                 discount_percent = user_row["discount_percent"] or 0
-                discount_percent = user_row["discount_percent"]
 
         def get_price(mat_id, category):
             if not mat_id:
@@ -478,11 +477,12 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
             row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
             if not row:
                 return 0, "לא נמצא", None
-            price = row["price_per_sqm"] * sqm * data.quantity
+            row_dict = dict(row)
+            price = row_dict["price_per_sqm"] * sqm * data.quantity
             
             # Check dimensions constraints
-            max_w = row.get("max_width", 0)
-            max_l = row.get("max_length", 0)
+            max_w = row_dict.get("max_width") or 0
+            max_l = row_dict.get("max_length") or 0
             if max_w > 0 and max_l > 0:
                 # Allow rotating: check if min(w,h) <= min(max_w, max_l) and max(w,h) <= max(max_w, max_l)
                 req_min = min(data.width_cm, data.height_cm)
@@ -490,13 +490,13 @@ def calculate_quote(data: QuoteRequest, credentials: HTTPAuthorizationCredential
                 mat_min = min(max_w, max_l)
                 mat_max = max(max_w, max_l)
                 if req_min > mat_min or req_max > mat_max:
-                    warnings.append(f"מידות חריגות עבור החומר '{row['name']}' (מקסימום {max_w}x{max_l} ס\"מ). תיתכן תוספת תשלום או חלוקה.")
+                    warnings.append(f"מידות חריגות עבור החומר '{row_dict['name']}' (מקסימום {max_w}x{max_l} ס\"מ). תיתכן תוספת תשלום או חלוקה.")
             elif max_w > 0 and data.width_cm > max_w:
-                warnings.append(f"רוחב חריג עבור '{row['name']}' (מקסימום {max_w} ס\"מ).")
+                warnings.append(f"רוחב חריג עבור '{row_dict['name']}' (מקסימום {max_w} ס\"מ).")
             elif max_l > 0 and data.height_cm > max_l:
-                warnings.append(f"אורך חריג עבור '{row['name']}' (מקסימום {max_l} ס\"מ).")
+                warnings.append(f"אורך חריג עבור '{row_dict['name']}' (מקסימום {max_l} ס\"מ).")
 
-            return price, row["name"], row
+            return price, row_dict["name"], row_dict
 
         print_price, print_name, print_row = get_price(data.print_material_id, "PRINT")
         base_price, base_name, base_row = get_price(data.base_material_id, "BASE")
