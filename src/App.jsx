@@ -765,13 +765,23 @@ function AdminPanel({ token }) {
                     <td>{u.invoice_name || "—"}</td>
                     <td dir="ltr">{u.tax_id || "—"}</td>
                     <td>{u.email || "—"}</td>
-                    <td>{u.company_name || "—"}</td>
+                    <td>{u.discount_percent || 0}%</td>
                     <td>{new Date(u.created_at).toLocaleDateString("he-IL")}</td>
+                    <td>
+                      <button className="btn btn-sm btn-edit" onClick={() => setEditingUser(u)} title="עריכה">✏️</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {editingUser && (
+            <EditUserModal
+              user={editingUser}
+              onSave={saveUser}
+              onClose={() => setEditingUser(null)}
+            />
+          )}
         </div>
       )}
 
