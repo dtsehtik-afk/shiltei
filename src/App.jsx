@@ -808,7 +808,9 @@ function AdminPanel({ token }) {
 function UserPanel({ token, userName }) {
   const [materials, setMaterials] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [products, setProducts] = useState([]);
   const [form, setForm] = useState({
+    product_id: '',
     width_cm: '', height_cm: '', quantity: 1,
     print_material_id: '', base_material_id: '', lamination_id: ''
   });
@@ -819,6 +821,7 @@ function UserPanel({ token, userName }) {
   useEffect(() => {
     apiCall('/api/materials').then(setMaterials);
     apiCall('/api/categories').then(setCategories);
+    apiCall('/api/products').then(setProducts);
   }, []);
 
   const byCategory = (name) => materials.filter(m => m.category_name === name);
@@ -859,6 +862,25 @@ function UserPanel({ token, userName }) {
         <div className='card'>
           <h3>📋 מחשבון הצעת מחיר</h3>
           <form onSubmit={calculate} className='form'>
+            <div className='form-group'>
+              <label>🛍️ בחירת מוצר מהיר (אופציונלי)</label>
+              <select value={form.product_id}
+                onChange={e => {
+                  const pid = e.target.value;
+                  const prod = products.find(p => p.id == pid);
+                  if (prod) {
+                    setForm({...form, product_id: pid, print_material_id: prod.print_material_id || '', base_material_id: prod.base_material_id || '', lamination_id: prod.lamination_id || ''});
+                  } else {
+                    setForm({...form, product_id: ''});
+                  }
+                }}>
+                <option value=''>-- בנייה אישית --</option>
+                {products.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+            
             <div className='form-row'>
               <div className='form-group'>
                 <label>רוחב (ס"מ)</label>

@@ -699,9 +699,15 @@ def admin_get_quotes(admin=Depends(get_current_admin)):
     return [dict(r) for r in rows]
 
 
-@app.get("/")
-def root():
-    return {"message": "🛑 שלטי הצפון API - v4.0", "docs": "/docs"}
+from fastapi.staticfiles import StaticFiles
+import os
+
+if os.path.isdir("dist"):
+    app.mount("/", StaticFiles(directory="dist", html=True), name="static")
+else:
+    @app.get("/")
+    def root():
+        return {"message": "שלטי הצפון API - v4.0", "docs": "/docs", "warning": "Frontend dist folder not found. Run 'vite build' to serve the React app."}
 
 
 # ─── Startup ───────────────────────────────────────────────────────────────────
