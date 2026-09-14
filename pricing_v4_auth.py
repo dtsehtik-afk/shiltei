@@ -616,8 +616,8 @@ def admin_update_material(material_id: int, data: MaterialUpdate, admin=Depends(
 @app.delete("/api/admin/materials/{material_id}")
 def admin_delete_material(material_id: int, admin=Depends(get_current_admin)):
     with get_db() as conn:
-        conn.execute("UPDATE materials SET active=0 WHERE id=?", (material_id,))
-    return {"message": "חומר הוסר"}
+        conn.execute("DELETE FROM materials WHERE id=?", (material_id,))
+    return {"message": "חומר נמחק"}
 
 
 @app.get("/api/admin/users")
