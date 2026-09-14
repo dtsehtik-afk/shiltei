@@ -19,7 +19,10 @@ from contextlib import contextmanager
 SECRET_KEY = os.getenv("SECRET_KEY", "shlate-tzafon-secret-key-change-in-production")
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
-DB_PATH = "pricing_v4.db"
+# DB_PATH should point at a persistent disk in production (e.g. Render Persistent
+# Disk mounted at /data) — the container filesystem itself is wiped on every deploy,
+# so without a persistent mount the database resets to empty each time.
+DB_PATH = os.getenv("DB_PATH", "pricing_v4.db")
 
 app = FastAPI(title="שלטי הצפון API", version="4.0")
 
@@ -34,6 +37,11 @@ app.add_middleware(
 security = HTTPBearer()
 
 # ─── Database ──────────────────────────────────────────────────────────────────
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
+
+
 @contextmanager
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -320,6 +328,17 @@ class UserUpdate(BaseModel):
     address: Optional[str] = None
     discount_percent: Optional[int] = None
 
+class AdminUserCreate(BaseModel):
+    first_name: str
+    last_name: str
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    company_name: Optional[str] = ""
+    invoice_name: Optional[str] = ""
+    tax_id: Optional[str] = ""
+    address: Optional[str] = ""
+    discount_percent: Optional[int] = 0
+
 class ProductCreate(BaseModel):
     name: str
     base_material_id: Optional[int] = None
@@ -335,6 +354,35 @@ class ProductUpdate(BaseModel):
 
 
 # ─── Shared Quote Calculation Logic ────────────────────────────────────────────
+def _fit_layout(item_w, item_h, qty, roll_w):
+    """Best-fit packing of `qty` items (item_w x item_h cm) across a roll of width roll_w (cm).
+    Returns dict with cols, rows, is_rotated, required_length_cm — or None if the item doesn't
+    fit the roll width in either orientation."""
+    if roll_w <= 0 or item_w <= 0 or item_h <= 0 or qty <= 0:
+        return None
+
+    cols_upright = int(roll_w // item_w)
+    len_upright = float('inf')
+    if cols_upright > 0:
+        rows_upright = (qty + cols_upright - 1) // cols_upright
+        len_upright = rows_upright * item_h
+
+    cols_rot = int(roll_w // item_h)
+    len_rot = float('inf')
+    if cols_rot > 0:
+        rows_rot = (qty + cols_rot - 1) // cols_rot
+        len_rot = rows_rot * item_w
+
+    best_len = min(len_upright, len_rot)
+    if best_len == float('inf'):
+        return None
+
+    is_rotated = len_rot < len_upright
+    cols = cols_rot if is_rotated else cols_upright
+    rows_n = (qty + cols - 1) // cols
+    return {"cols": cols, "rows": rows_n, "is_rotated": is_rotated, "required_length_cm": best_len}
+
+
 def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None):
     sqm = (data.width_cm / 100) * (data.height_cm / 100)
     sqm = max(sqm, 0.1)
@@ -352,10 +400,10 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
 
     def get_price(mat_id, category):
         if not mat_id:
-            return 0, "ללא", None
+            return 0, "ללא", None, None
         row = conn.execute("SELECT * FROM materials WHERE id=?", (mat_id,)).fetchone()
         if not row:
-            return 0, "לא נמצא", None
+            return 0, "לא נמצא", None, None
         row_dict = dict(row)
         price_per_sqm = row_dict["price_per_sqm"]
 
@@ -374,57 +422,62 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
         elif max_l > 0 and data.height_cm > max_l:
             warnings.append(f"אורך חריג עבור '{row_dict['name']}' (מקס' {max_l} ס\"מ)")
 
-        # Apply per-material minimum sqm (effective_sqm = max(sqm, min_sqm))
+        # Roll materials (max_width set): figure out the actual sheet layout FIRST.
+        # All minimums below are checked against what actually gets cut from the roll
+        # (including layout waste), not against the flat per-item area.
+        layout = None
+        if max_w > 0:
+            layout = _fit_layout(data.width_cm, data.height_cm, data.quantity, max_w)
+
+        if layout:
+            actual_sqm = (max_w / 100) * (layout["required_length_cm"] / 100)
+        else:
+            actual_sqm = sqm * data.quantity
+
+        # Apply per-material minimum sqm for the whole job (post-layout)
         min_sqm_mat = row_dict.get("min_sqm") or 0
-        effective_sqm = max(sqm, min_sqm_mat) if min_sqm_mat > 0 else sqm
-        price = price_per_sqm * effective_sqm * data.quantity
-        if effective_sqm > sqm + 1e-9:
-            extra_sqm = effective_sqm - sqm
+        if min_sqm_mat > 0 and actual_sqm < min_sqm_mat:
+            extra_sqm = min_sqm_mat - actual_sqm
+            actual_sqm = min_sqm_mat
             warnings.append(
                 f"הופעל מ\"ר מינימום עבור '{row_dict['name']}' (מינ' {min_sqm_mat} מ\"ר) — "
                 f"ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
             )
 
-        # Apply minimum price per material
-        min_price = row_dict.get("min_price") or 0
-        if min_price > 0 and price < min_price * data.quantity:
-            msg = f"הופעל מחיר מינימום עבור '{row_dict['name']}' (מינ' ₪{min_price} ליחידה)"
-            if price_per_sqm > 0:
-                max_sqm_at_min = min_price / price_per_sqm
-                extra_sqm = max_sqm_at_min - effective_sqm
-                if extra_sqm > 0.01:
-                    msg += f" — ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
-            price = min_price * data.quantity
-            warnings.append(msg)
+        price = price_per_sqm * actual_sqm
 
-        # Apply minimum linear meter
+        # Apply minimum linear meter (roll materials only, post-layout)
         min_linear_m = row_dict.get("min_linear_m") or 0
-        if min_linear_m > 0 and data.width_cm > 0 and data.height_cm > 0:
-            # min_linear_m is in meters; convert width to meters for roll calc
-            roll_w_m = (max_w / 100) if max_w > 0 else (data.width_cm / 100)
-            item_h_m = data.height_cm / 100
-            item_w_m = data.width_cm / 100
-            cols = int(roll_w_m // item_w_m) if roll_w_m > 0 else 0
-            if cols > 0:
-                actual_length_m = item_h_m * ((data.quantity + cols - 1) // cols)
-            else:
-                actual_length_m = item_h_m * data.quantity
+        if min_linear_m > 0 and layout:
+            actual_length_m = layout["required_length_cm"] / 100
             if actual_length_m < min_linear_m:
-                min_sqm_from_linear = min_linear_m * roll_w_m
+                extra_length = min_linear_m - actual_length_m
+                min_sqm_from_linear = min_linear_m * (max_w / 100)
                 min_price_from_linear = price_per_sqm * min_sqm_from_linear
-                if price < min_price_from_linear:
-                    extra_length = min_linear_m - actual_length_m
+                if min_price_from_linear > price:
                     price = min_price_from_linear
                     warnings.append(
                         f"הופעל מטר רץ מינימלי עבור '{row_dict['name']}' (מינ' {min_linear_m} מ') — "
                         f"ניתן לנצל עוד כ-{extra_length:.2f} מ' באותו מחיר"
                     )
 
-        return price, row_dict["name"], row_dict
+        # Apply minimum price for the whole job (checked last, against the final price)
+        min_price = row_dict.get("min_price") or 0
+        if min_price > 0 and price < min_price:
+            msg = f"הופעל מחיר מינימום עבור '{row_dict['name']}' (מינ' ₪{min_price} לעבודה)"
+            if price_per_sqm > 0:
+                max_sqm_at_min = min_price / price_per_sqm
+                extra_sqm = max_sqm_at_min - actual_sqm
+                if extra_sqm > 0.01:
+                    msg += f" — ניתן לנצל עוד כ-{extra_sqm:.2f} מ\"ר באותו מחיר"
+            price = min_price
+            warnings.append(msg)
 
-    print_price, print_name, print_row = get_price(data.print_material_id, "PRINT")
-    base_price, base_name, base_row = get_price(data.base_material_id, "BASE")
-    lam_price, lam_name, lam_row = get_price(data.lamination_id, "LAMINATION")
+        return price, row_dict["name"], row_dict, layout
+
+    print_price, print_name, print_row, print_layout = get_price(data.print_material_id, "PRINT")
+    base_price, base_name, base_row, _ = get_price(data.base_material_id, "BASE")
+    lam_price, lam_name, lam_row, _ = get_price(data.lamination_id, "LAMINATION")
 
     total_before_discount = print_price + base_price + lam_price
     discount_amount = total_before_discount * (discount_percent / 100.0)
@@ -432,42 +485,24 @@ def compute_quote(conn, data: QuoteRequest, user_id=None, discount_override=None
     vat_amount = total_after_discount * 0.18  # VAT 18%
     final_total = total_after_discount + vat_amount
 
-    # Layout logic
+    # Layout details (admin-only in the UI) — reuses the exact layout used for pricing above,
+    # so the numbers shown always match what was actually charged.
     layout_details = None
-    if print_row and (print_row.get("max_width") or 0) > 0:
+    if print_layout and print_row:
         roll_w = print_row["max_width"]
-        item_w = data.width_cm
-        item_h = data.height_cm
+        best_len = print_layout["required_length_cm"]
         qty = data.quantity
-
-        cols_upright = int(roll_w // item_w) if item_w > 0 else 0
-        len_upright = float('inf')
-        if cols_upright > 0:
-            rows_upright = (qty + cols_upright - 1) // cols_upright
-            len_upright = rows_upright * item_h
-
-        cols_rot = int(roll_w // item_h) if item_h > 0 else 0
-        len_rot = float('inf')
-        if cols_rot > 0:
-            rows_rot = (qty + cols_rot - 1) // cols_rot
-            len_rot = rows_rot * item_w
-
-        best_len = min(len_upright, len_rot)
-        if best_len != float('inf'):
-            is_rotated = len_rot < len_upright
-            cols = cols_rot if is_rotated else cols_upright
-            rows_n = (qty + cols - 1) // cols
-            used_area = (item_w / 100) * (item_h / 100) * qty
-            total_roll_area = (roll_w / 100) * (best_len / 100)
-            waste_percent = max(0, ((total_roll_area - used_area) / total_roll_area) * 100) if total_roll_area > 0 else 0
-            layout_details = {
-                "roll_width_m": round(roll_w / 100, 2),
-                "required_length_m": round(best_len / 100, 2),
-                "columns": cols,
-                "rows": rows_n,
-                "is_rotated": is_rotated,
-                "waste_percent": round(waste_percent, 1)
-            }
+        used_area = (data.width_cm / 100) * (data.height_cm / 100) * qty
+        total_roll_area = (roll_w / 100) * (best_len / 100)
+        waste_percent = max(0, ((total_roll_area - used_area) / total_roll_area) * 100) if total_roll_area > 0 else 0
+        layout_details = {
+            "roll_width_m": round(roll_w / 100, 2),
+            "required_length_m": round(best_len / 100, 2),
+            "columns": print_layout["cols"],
+            "rows": print_layout["rows"],
+            "is_rotated": print_layout["is_rotated"],
+            "waste_percent": round(waste_percent, 1)
+        }
 
     return {
         "sqm": round(sqm, 4),
@@ -685,6 +720,32 @@ def admin_get_users(admin=Depends(get_current_admin)):
             "SELECT id, first_name, last_name, email, phone, company_name, invoice_name, tax_id, address, discount_percent, created_at FROM users"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.post("/api/admin/users")
+def admin_create_user(data: AdminUserCreate, admin=Depends(get_current_admin)):
+    """Register a walk-in customer directly from the admin panel (e.g. while
+    generating a quote at the counter). No password is set — the customer can
+    log in later via phone, same as self-registration by phone."""
+    phone = (data.phone or "").strip().replace("-", "")
+    with get_db() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO users (first_name, last_name, email, phone, company_name,
+                    invoice_name, tax_id, address, discount_percent, password_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')""",
+                (data.first_name, data.last_name, data.email or "", phone,
+                 data.company_name or "", data.invoice_name or "", data.tax_id or "",
+                 data.address or "", data.discount_percent or 0)
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="לקוח עם פרטים אלו כבר קיים במערכת")
+        user_id = cur.lastrowid
+        row = conn.execute(
+            "SELECT id, first_name, last_name, email, phone, company_name, invoice_name, tax_id, address, discount_percent, created_at FROM users WHERE id=?",
+            (user_id,)
+        ).fetchone()
+    return dict(row)
 
 
 @app.put("/api/admin/users/{user_id}")

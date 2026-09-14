@@ -664,23 +664,22 @@ body {
 }
 
 /* ─── Print ──────────────────────────────────────────────────────────────────── */
+/* Printing is scoped to exactly one section at a time (see printSection() in App.jsx).
+   Whichever element got [data-print-active] is the whole print job — everything else
+   (modal chrome, buttons, other sections such as an admin-only cutting layout) is left
+   out entirely, so a customer print never includes anything meant for admin only. */
 @media print {
-  .header, .footer, .btn, .tab-group, .form { display: none; }
-  .result-card { box-shadow: none; border: 1px solid #ddd; }
-}
-
-/* Print & Professional Quote Layout */
-@media print {
-  body * { visibility: hidden; }
-  .result-card, .result-card * { visibility: visible; }
-  .result-card {
+  body.printing-section * { visibility: hidden; }
+  body.printing-section [data-print-active],
+  body.printing-section [data-print-active] * { visibility: visible !important; }
+  body.printing-section [data-print-active] {
     position: absolute; left: 0; top: 0;
     width: 100%; border: none; box-shadow: none;
     margin: 0; padding: 0;
     background: #fff;
   }
+  body.printing-section [data-print-active] .btn { display: none !important; }
   .print-page-break { page-break-before: always; }
-  .btn, .header, .panel-header { display: none !important; }
 }
 
 .quote-header {
